@@ -17,14 +17,20 @@ import gc
 import numpy as np
 import OpenGL.GL as gl
 import OpenGL.GLU as glu
+import os
+from random import shuffle
 from PIL import Image
+
+from scipy.fftpack import fft, fftfreq
+import fftutils
 
 from nanogui import Color, ColorPicker, Screen, Window, GroupLayout, BoxLayout, \
                     ToolButton, Label, Button, Widget, \
                     Popup, PopupButton, CheckBox, MessageDialog, VScrollPanel, \
                     ImagePanel, ImageView, ComboBox, ProgressBar, Slider, \
                     TextBox, ColorWheel, Graph, GridLayout, \
-                    Alignment, Orientation, TabWidget, IntBox, GLShader, GLCanvas
+                    Alignment, Orientation, TabWidget, IntBox, GLShader, GLCanvas, \
+                    AdvancedGridLayout
 
 from nanogui import glfw, entypo
 
@@ -32,16 +38,229 @@ import pyaudio
 from pydub import AudioSegment
 from pydub.utils import make_chunks
 
+import argparse
+
 # A simple counter, used for dynamic tab creation with TabWidget callback
 counter = 1
+
+SAMPLE_WIDTH = 2
+CHANNELS = 2
+FRAME_RATE = 44100
+
+
+class AudioEngine:
+    def __init__(self):
+        self.player = None
+        self.stream = None
+        self.layers = []
+        self.img_cache = []
+        self.sound_cache = []
+
+    def init_player(self):
+        if self.player and self.stream:
+            return
+        
+        self.player = pyaudio.PyAudio()
+
+        self.stream = player.open(format=SAMPLE_WIDTH,
+                                  channels=CHANNELS,
+                                  rate=FRAME_RATE,
+                                  output=True)
+
+    def set_marker(self, marker):
+        self.marker = marker
+
+    def read_output(self, frames):
+        print('[+] AudioEngine:: read_output')
+
+    def get_visualized_output(self):
+        print('[+] AudioEngine:: get_visualized_output')
+
+    def on_new_layer(self, layer):
+        print('[+] AudioEngine:: on_new_layer')
+
+
+class LayersWindow(Window):
+    def __init__(self, parent, engine, width=400):
+        super(LayersWindow, self).__init__(parent, 'Layers')
+        self.setLayout(GridLayout(orientation=Orientation.Vertical))
+        
+        SCROLL_BAR = 100
+        self.layers_scroll = VScrollPanel(self)
+        self.layers_scroll.setFixedSize((width, 600))
+        self.layers = LayersList(self.layers_scroll, engine)
+        self.redraw_spec_cb = None
+        self.engine = engine
+
+        right_align = Widget(self)
+        right_align.setLayout(GridLayout())
+
+        TOOLS_WIDTH = 130
+        TOOLS_HEIGHT = 15
+
+        spacer = Widget(right_align)
+        spacer.setSize((width - TOOLS_WIDTH, TOOLS_HEIGHT))
+
+        tools = Widget(right_align)
+        tools.setLayout(BoxLayout(Orientation.Horizontal, spacing=6))
+        tools.setFixedSize((TOOLS_WIDTH, TOOLS_HEIGHT))
+
+        # ToolButton(tools, entypo.ICON_CONTROLLER_FAST_FORWARD)
+        ToolButton(tools, entypo.ICON_COMPASS)
+        tb = ToolButton(tools, entypo.ICON_ADD_TO_LIST)
+
+        def cb():
+            layer = self.layers.add_layer("New Layer")
+            if self.redraw_spec_cb:
+                self.redraw_spec_cb()
+        
+        tb.setCallback(cb)
+        ToolButton(tools, entypo.ICON_TRASH)
+        
+        self.setPosition((960, TOOLS_HEIGHT))
+        self.setSize((width, 800))
+        self.setLayout(GridLayout(Orientation.Vertical, resolution=2))
+
+
+def hex_to_rgb(h):
+    ret = tuple(int(h[i:i+2], 16)/255.0 for i in (0, 2, 4))
+    # print(h, ret)
+    return ret
+
+
+class LayersList(Widget):
+    def __init__(self, parent, engine):
+        super(LayersList, self).__init__(parent)
+        self.setLayout(GroupLayout())
+        self.layers = []
+        self.shouldPerformLayout = False
+        self.engine = engine
+        self.colorchoices = []
+        self.colorchoices.append('f5a430')
+        self.colorchoices.append('f56332')
+        self.colorchoices.append('f54fc9')
+        self.colorchoices.append('40e43d')
+        self.colorchoices.append('40dcff')
+        self.colorchoices.append('49a4ff')
+        self.colorchoices.append('fc7f7f')
+
+        for i in range(0):
+            self.add_layer('Layer ' + str(i+1))
+            
+        self.setFixedSize((400, 0))
+
+    def add_layer(self, name, file_path=None):
+        valid = [("mp3", ""), ("wav", "")]
+        if not file_path:
+            file_path = nanogui.file_dialog(valid, False)
+        # result = '/Users/amiramitai/Projects/nomix/st.mp3'
+        if not os.path.isfile(file_path):
+            RuntimeError("Selected file isn't in place", result)
+        
+        song = AudioSegment.from_file(file_path)
+        shuffle(self.colorchoices)
+        h = self.colorchoices.pop()
+        print(h)
+        rgb = hex_to_rgb(h)
+        color = Color(rgb[0], rgb[1], rgb[2], 1.0)
+        sl = SoundLayer(self, name, song, color)
+        self.layers.append(sl)
+        self.shouldPerformLayout = True
+        self.engine.on_new_layer(sl)
+
+    def draw(self, ctx):
+        if self.shouldPerformLayout:
+            print('[+] performing layout!')
+            self.performLayout(ctx)
+            self.shouldPerformLayout = False
+        super(LayersList, self).draw(ctx)
+        
+
+class SoundLayer(Widget):
+    def __init__(self, parent, name, sound, color):
+        super(SoundLayer, self).__init__(parent)
+        print('[+] SoundLayer::__init__')
+        self.setLayout(GridLayout(resolution=4))
+        self.sound = sound
+        self.cp = Button(self, "")
+        self.color = color
+        self.cp.setBackgroundColor(color)
+        label = Label(self, name + ":", "sans-bold")
+        label.setFixedSize((70, 20))
+        self.cp.setFixedSize((20, 40))
+        self.solomute = Widget(self)
+        self.solomute.setLayout(GridLayout(resolution=3))
+
+        self.issolo = False
+        self.ismute = False
+        slider = Slider(self.solomute)
+        slider.setFixedSize((180, 20))
+
+        def mute_cb():
+            print("mute")
+
+        mute = Button(self.solomute, 'M')
+        mute.setCallback(mute_cb)
+        
+        def solo_cb():
+            print("solo")
+
+        solo = Button(self.solomute, 'S')
+        solo.setCallback(solo_cb)
+        spacer = Widget(self)
+        spacer.setWidth(20)
+
+        self.setFixedSize((400, 40))
+
+    def get_spect_image(self, fft_size, zoom=1, offset=0):
+        print("[+] sound.sample_width", self.sound.sample_width)
+        print("[+] sound.channels", self.sound.channels)
+        print("[+] sound.frame_rate", self.sound.frame_rate)
+        print("[+] sound.frame_count", int(self.sound.frame_count()))
+        # s1 = self.sound[:, 0] # left channel
+        for chunks in make_chunks(self.sound, int(self.sound.frame_count())):
+            samps = chunks.get_array_of_samples()
+            left = np.array(samps[::2])  # left ch
+            
+
+        player = pyaudio.PyAudio()
+        stream = player.open(format=SAMPLE_WIDTH,
+                             channels=1,
+                             rate=int(FRAME_RATE/2),
+                             output=True)
+        ret = fftutils.get_fft_from_channel(left, fft_size=fft_size)
+        back = fftutils.get_channel_from_fft(left, fft_size=fft_size)
+        stream.write(back)
+        gamma = 2.0
+
+        ret = np.clip(ret, -40, 200)    # clip values
+        ret = ret + 40  # to pix
+        # result = np.power((result / 255), (1 / gamma)) * 255
+
+        
+
+        ret = np.uint8(np.concatenate(ret.T)).reshape(fft_size, len(ret))[::-1, :]
+        return ret
+        # import pdb; pdb.set_trace()
+
+
+class AudioWindow(Window):
+    def __init__(self, parent):
+        super(AudioWindow, self).__init__(parent, "Audio View")
+        self.setPosition((15, 15))
+        self.setLayout(GroupLayout())
+        self.canvas = AudioCanvas(self)
 
 
 class AudioCanvas(GLCanvas):
     def __init__(self, parent):
         super(AudioCanvas, self).__init__(parent)
-        self.sound = AudioSegment.from_file('rnm.mp3')
         self.rotation = [0.25, 0.5, 0.33]
         self.shader = GLShader()
+        self.color = (1.0, 1.0, 1.0)
+        self.marker = 0
+        self.frames = 10000
+        self.left_click_down = False
         self.shader.init(
             # An identifying name
             "a_simple_shader",
@@ -61,11 +280,21 @@ class AudioCanvas(GLCanvas):
             # Fragment shader
             """#version 330
             uniform sampler2D image;
+            uniform vec3 in_color;
+            uniform float marker;
             in vec2 uv;
             out vec4 color;
             void main() {
                 vec4 current = texture(image, uv);
-                color = vec4(current.xyz, 1.0);
+                color = vec4(current.x * in_color.x,
+                             current.y * in_color.y,
+                             current.z * in_color.z, 1.0);
+                if (marker > 0) {
+                    if (abs(uv.x - marker) <= 0.001) {
+                        color = vec4(1.0 - color.x, 1.0 - color.y, 1.0 - color.z, 1.0);
+                    }
+                    
+                }
             }"""
         )
 
@@ -104,17 +333,51 @@ class AudioCanvas(GLCanvas):
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
 
-        self.im = Image.open('spect.png').convert('RGB')
-        textureData = np.array(self.im)
-        self.width = self.im.size[0]
-        self.height = self.im.size[1]
-        glu.gluBuild2DMipmaps(gl.GL_TEXTURE_2D, gl.GL_RGB, self.width, self.height, gl.GL_RGB,
-                              gl.GL_UNSIGNED_BYTE, textureData)
+        # self.im = Image.open('spect.png').convert('RGB')
+        # textureData = np.array(self.im)
+        # self.width = self.im.size[0]
+        # self.height = self.im.size[1]
+        # glu.gluBuild2DMipmaps(gl.GL_TEXTURE_2D, gl.GL_RGB, self.width, self.height, gl.GL_RGB,
+                            #   gl.GL_UNSIGNED_BYTE, textureData)
 
         self.shader.uploadAttrib("position", positions2)
         self.shader.uploadAttrib("in_uvs", uvs)
 
         self.dial = 0
+        self.setSize((900, 250))
+
+    def mouseButtonEvent(self, p, button, down, modifiers):
+        print("[+] AudioCanvas::mouseButtonEvent", p, button, down, modifiers)
+        if (button == 0):
+            self.left_click_down = down
+            if down:
+                self.marker = ((p[0]-15) / self.width()) * self.frames
+        return super(AudioCanvas, self).mouseButtonEvent(p, button, down, modifiers)
+
+    def mouseMotionEvent(self, p, rel, button, modifiers):
+        print("[+] AudioCanvas::mouseMotionEvent", p, rel, button, modifiers)
+        if self.left_click_down:
+            self.marker = ((p[0]-15) / self.width()) * self.frames
+        return super(AudioCanvas, self).mouseMotionEvent(p, rel, button, modifiers)
+
+    def draw_spect(self, layers):
+        print("[+] AudioCanvas::draw_spect", layers)
+        for layer in layers:
+            self.color = (layer.color.r, layer.color.g, layer.color.b)
+            textureData = layer.get_spect_image(fft_size=2048)
+            # import pdb; pdb.set_trace()
+            width = 800
+            im = Image.fromarray(textureData).resize((width, 128)).convert('RGB')
+            textureData = np.array(im)
+            height = 128
+            # import pdb; pdb.set_trace()
+            self.shader.bind()
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.videotexid)
+            glu.gluBuild2DMipmaps(gl.GL_TEXTURE_2D, gl.GL_RGB, width, height, gl.GL_RGB,
+                                  gl.GL_UNSIGNED_BYTE, textureData)
+            self.drawGL()
+            
 
     def drawContents(self):
         # print("[+] AudioCanvas::drawContents")
@@ -134,6 +397,8 @@ class AudioCanvas(GLCanvas):
         mvp[0:3, 0:3] *= 0.75 * fac + 0.25
 
         self.shader.setUniform("modelViewProj", mvp)
+        self.shader.setUniform("in_color", self.color)
+        self.shader.setUniform("marker", self.marker/self.frames)
 
         nanogui.gl.Enable(nanogui.gl.DEPTH_TEST)
         self.shader.setUniform("image", 0)
@@ -145,202 +410,56 @@ class AudioCanvas(GLCanvas):
         print('[+] AudioCanvas::scrollEvent', event, event1)
 
 
+class PlaybackWindow(Window):
+    def __init__(self, parent):
+        super(PlaybackWindow, self).__init__(parent, "Playback")
+        self.setPosition((15, 330))
+        self.setLayout(GroupLayout())
+        self.setFixedSize((400, 400))
+
+
+        Label(self, "Location", "sans-bold")
+        panel = Widget(self)
+        panel.setLayout(BoxLayout(Orientation.Horizontal, Alignment.Middle, 0, 0))
+        self.frametb = TextBox(panel)
+        self.frametb.setFixedSize((100, 25))
+        self.frametb.setValue("0")
+        self.frametb.setFontSize(14)
+        self.frametb.setAlignment(TextBox.Alignment.Right)
+
+        label = Label(panel, " ", "sans-bold")
+        label.setFixedSize((15, 15))
+        label = Label(panel, "/", "sans-bold")
+        label.setFixedSize((20, 15))
+
+        self.total_framestb = TextBox(panel)
+        self.total_framestb.setFixedSize((100, 25))
+        self.total_framestb.setValue("1000")
+        self.total_framestb.setFontSize(14)
+        self.total_framestb.setAlignment(TextBox.Alignment.Right)
+
+        
+        Label(self, "Controls", "sans-bold")
+        panel = Widget(self)
+        panel.setLayout(BoxLayout(Orientation.Horizontal, Alignment.Minimum, 0, 0))
+        ToolButton(panel, entypo.ICON_CONTROLLER_FAST_BACKWARD)
+        ToolButton(panel, entypo.ICON_CONTROLLER_STOP)
+        # ToolButton(panel, entypo.ICON_CONTROLLER_PAUS)
+        ToolButton(panel, entypo.ICON_CONTROLLER_PLAY)
+        ToolButton(panel, entypo.ICON_CONTROLLER_FAST_FORWARD)
+
+
 class NomixApp(Screen):
     def __init__(self):
         super(NomixApp, self).__init__((1440, 900), "Nomix")
 
-        window = Window(self, "Button demo")
-        window.setPosition((15, 330))
-        window.setLayout(GroupLayout())
+        self.engine = AudioEngine()
 
-        Label(window, "Push buttons", "sans-bold")
-        b = Button(window, "Plain button")
+        self.audio_window = AudioWindow(self)
+        self.layers_window = LayersWindow(self, self.engine)
+        self.layers_window.redraw_spec_cb = self.redraw_spect
 
-        def cb():
-            print("pushed!")
-        b.setCallback(cb)
-
-        b = Button(window, "Styled", entypo.ICON_ROCKET)
-        b.setBackgroundColor(Color(0, 0, 1.0, 0.1))
-        b.setCallback(cb)
-
-        Label(window, "Toggle buttons", "sans-bold")
-        b = Button(window, "Toggle me")
-        b.setFlags(Button.Flags.ToggleButton)
-
-        def change_cb(state):
-            print("Toggle button state: %s" % str(state))
-        b.setChangeCallback(change_cb)
-
-        Label(window, "Radio buttons", "sans-bold")
-        b = Button(window, "Radio button 1")
-        b.setFlags(Button.Flags.RadioButton)
-        b = Button(window, "Radio button 2")
-        b.setFlags(Button.Flags.RadioButton)
-
-        Label(window, "A tool palette", "sans-bold")
-        tools = Widget(window)
-        tools.setLayout(BoxLayout(Orientation.Horizontal,
-                                  Alignment.Middle, 0, 6))
-
-        ToolButton(tools, entypo.ICON_CLOUD)
-        ToolButton(tools, entypo.ICON_CONTROLLER_FAST_FORWARD)
-        ToolButton(tools, entypo.ICON_COMPASS)
-        ToolButton(tools, entypo.ICON_INSTALL)
-
-        Label(window, "Popup buttons", "sans-bold")
-        popupBtn = PopupButton(window, "Popup", entypo.ICON_EXPORT)
-        popup = popupBtn.popup()
-        popup.setLayout(GroupLayout())
-        Label(popup, "Arbitrary widgets can be placed here")
-        CheckBox(popup, "A check box")
-        # popup right
-        popupBtn = PopupButton(popup, "Recursive popup", entypo.ICON_FLASH)
-        popupRight = popupBtn.popup()
-        popupRight.setLayout(GroupLayout())
-        CheckBox(popupRight, "Another check box")
-        # popup left
-        popupBtn = PopupButton(popup, "Recursive popup", entypo.ICON_FLASH)
-        popupBtn.setSide(Popup.Side.Left)
-        popupLeft = popupBtn.popup()
-        popupLeft.setLayout(GroupLayout())
-        CheckBox(popupLeft, "Another check box")
-
-        window = Window(self, "Basic widgets")
-        window.setPosition((200, 330))
-        window.setLayout(GroupLayout())
-
-        Label(window, "Message dialog", "sans-bold")
-        tools = Widget(window)
-        tools.setLayout(BoxLayout(Orientation.Horizontal,
-                                  Alignment.Middle, 0, 6))
-
-        def cb2(result):
-            print("Dialog result: %i" % result)
-
-        b = Button(tools, "Info")
-
-        def cb():
-            dlg = MessageDialog(self, MessageDialog.Type.Information, "Title",
-                                "This is an information message")
-            dlg.setCallback(cb2)
-        b.setCallback(cb)
-
-        b = Button(tools, "Warn")
-
-        def cb():
-            dlg = MessageDialog(self, MessageDialog.Type.Warning, "Title",
-                                "This is a warning message")
-            dlg.setCallback(cb2)
-        b.setCallback(cb)
-
-        b = Button(tools, "Ask")
-
-        def cb():
-            dlg = MessageDialog(self, MessageDialog.Type.Warning, "Title",
-                                "This is a question message", "Yes", "No",
-                                True)
-            dlg.setCallback(cb2)
-        b.setCallback(cb)
-
-        import os
-        import sys
-        os.chdir(sys.path[0])
-        try:
-            icons = nanogui.loadImageDirectory(self.nvgContext(), "icons")
-        except:
-            try:
-                icons = nanogui.loadImageDirectory(self.nvgContext(), "3rd/nanogui/icons")
-            except:
-                icons = nanogui.loadImageDirectory(self.nvgContext(), "3rd/nanogui/resources/icons")
-
-
-        Label(window, "Image panel & scroll panel", "sans-bold")
-        imagePanelBtn = PopupButton(window, "Image Panel")
-        imagePanelBtn.setIcon(entypo.ICON_FOLDER)
-        popup = imagePanelBtn.popup()
-        vscroll = VScrollPanel(popup)
-        imgPanel = ImagePanel(vscroll)
-        imgPanel.setImages(icons)
-        popup.setFixedSize((245, 150))
-
-        img_window = Window(self, "Audio View")
-        # import pdb; pdb.set_trace()
-        img_window.setPosition((15, 15))
-        img_window.setLayout(GroupLayout())
-
-        # imgView = AudioWindow(img_window, icons[0][0])
-        imgView = AudioCanvas(img_window)
-        imgView.setSize((900, 250))
-
-        def cb(i):
-            print("Selected item %i" % i)
-            imgView.bindImage(icons[i][0])
-        imgPanel.setCallback(cb)
-
-        # imgView.setGridThreshold(3)
-
-        Label(window, "File dialog", "sans-bold")
-        tools = Widget(window)
-        tools.setLayout(BoxLayout(Orientation.Horizontal,
-                                  Alignment.Middle, 0, 6))
-        b = Button(tools, "Open")
-        valid = [("png", "Portable Network Graphics"), ("txt", "Text file")]
-
-        def cb():
-            result = nanogui.file_dialog(valid, False)
-            print("File dialog result = %s" % result)
-
-        b.setCallback(cb)
-        b = Button(tools, "Save")
-
-        def cb():
-            result = nanogui.file_dialog(valid, True)
-            print("File dialog result = %s" % result)
-
-        b.setCallback(cb)
-
-        Label(window, "Combo box", "sans-bold")
-        ComboBox(window, ["Combo box item 1", "Combo box item 2",
-                          "Combo box item 3"])
-        Label(window, "Check box", "sans-bold")
-
-        def cb(state):
-            print("Check box 1 state: %s" % state)
-        chb = CheckBox(window, "Flag 1", cb)
-        chb.setChecked(True)
-
-        def cb(state):
-            print("Check box 2 state: %s" % state)
-        CheckBox(window, "Flag 2", cb)
-
-        Label(window, "Progress bar", "sans-bold")
-        self.progress = ProgressBar(window)
-
-        Label(window, "Slider and text box", "sans-bold")
-
-        panel = Widget(window)
-        panel.setLayout(BoxLayout(Orientation.Horizontal,
-                                  Alignment.Middle, 0, 20))
-
-        slider = Slider(panel)
-        slider.setValue(0.5)
-        slider.setFixedWidth(80)
-
-        textBox = TextBox(panel)
-        textBox.setFixedSize((60, 25))
-        textBox.setValue("50")
-        textBox.setUnits("%")
-        textBox.setFontSize(20)
-        textBox.setAlignment(TextBox.Alignment.Right)
-
-        def cb(value):
-            textBox.setValue("%i" % int(value * 100))
-        slider.setCallback(cb)
-
-        def cb(value):
-            print("Final slider value: %i" % int(value * 100))
-        slider.setFinalCallback(cb)
+        self.pbwindow = PlaybackWindow(self)
 
         window = Window(self, "Misc. widgets")
         window.setPosition((675, 330))
@@ -409,7 +528,7 @@ class NomixApp(Screen):
         floatBox.setEditable(True)
         floatBox.setFixedSize((100, 20))
         floatBox.setValue("50")
-        floatBox.setUnits("GiB")
+        # floatBox.setUnits("GiB")
         floatBox.setDefaultValue("0.0")
         floatBox.setFontSize(16)
         floatBox.setFormat("[-]?[0-9]*\\.?[0-9]+")
@@ -493,8 +612,15 @@ class NomixApp(Screen):
 
         self.performLayout()
 
+    def add_layer(self, file_path):
+        name = os.path.basename(file_path)
+        self.layers_window.layers.add_layer(name, file_path=file_path)
+
+    def redraw_spect(self):
+        self.audio_window.canvas.draw_spect(self.layers_window.layers.layers)
+
     def draw(self, ctx):
-        self.progress.setValue(math.fmod(time.time() / 10, 1))
+        # self.progress.setValue(math.fmod(time.time() / 10, 1))
         super(NomixApp, self).draw(ctx)
 
     def drawContents(self):
@@ -514,11 +640,20 @@ if __name__ == "__main__":
     # app = NSApplication.sharedApplication()
     # delegate = MyApplicationAppDelegate.alloc().init()
     # app.setDelegate_(delegate)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('audiofiles', nargs='*')
+
+    args = parser.parse_args()
     nanogui.init()
     nomix = NomixApp()
+    for audiofile in args.audiofiles:
+        nomix.add_layer(audiofile)
+    if args.audiofiles:
+        nomix.redraw_spect()
     nomix.drawAll()
     nomix.setVisible(True)
     nanogui.mainloop()
     del nomix
     gc.collect()
     nanogui.shutdown()
+
