@@ -1,0 +1,4 @@
+/.env
+*DS_STORE
+/3rd
+/.vscode

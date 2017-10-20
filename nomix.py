@@ -37,8 +37,13 @@ from nanogui import glfw, entypo
 import pyaudio
 from pydub import AudioSegment
 from pydub.utils import make_chunks
+import pyfftw
+
 
 import argparse
+
+pyfftw.interfaces.cache.enable()
+
 
 # A simple counter, used for dynamic tab creation with TabWidget callback
 counter = 1
@@ -59,7 +64,7 @@ class AudioEngine:
     def init_player(self):
         if self.player and self.stream:
             return
-        
+
         self.player = pyaudio.PyAudio()
 
         self.stream = player.open(format=SAMPLE_WIDTH,
@@ -84,7 +89,7 @@ class LayersWindow(Window):
     def __init__(self, parent, engine, width=400):
         super(LayersWindow, self).__init__(parent, 'Layers')
         self.setLayout(GridLayout(orientation=Orientation.Vertical))
-        
+
         SCROLL_BAR = 100
         self.layers_scroll = VScrollPanel(self)
         self.layers_scroll.setFixedSize((width, 600))
@@ -113,10 +118,10 @@ class LayersWindow(Window):
             layer = self.layers.add_layer("New Layer")
             if self.redraw_spec_cb:
                 self.redraw_spec_cb()
-        
+
         tb.setCallback(cb)
         ToolButton(tools, entypo.ICON_TRASH)
-        
+
         self.setPosition((960, TOOLS_HEIGHT))
         self.setSize((width, 800))
         self.setLayout(GridLayout(Orientation.Vertical, resolution=2))
@@ -146,7 +151,7 @@ class LayersList(Widget):
 
         for i in range(0):
             self.add_layer('Layer ' + str(i+1))
-            
+
         self.setFixedSize((400, 0))
 
     def add_layer(self, name, file_path=None):
@@ -156,7 +161,7 @@ class LayersList(Widget):
         # result = '/Users/amiramitai/Projects/nomix/st.mp3'
         if not os.path.isfile(file_path):
             RuntimeError("Selected file isn't in place", result)
-        
+
         song = AudioSegment.from_file(file_path)
         shuffle(self.colorchoices)
         h = self.colorchoices.pop()
@@ -174,7 +179,7 @@ class LayersList(Widget):
             self.performLayout(ctx)
             self.shouldPerformLayout = False
         super(LayersList, self).draw(ctx)
-        
+
 
 class SoundLayer(Widget):
     def __init__(self, parent, name, sound, color):
@@ -201,7 +206,7 @@ class SoundLayer(Widget):
 
         mute = Button(self.solomute, 'M')
         mute.setCallback(mute_cb)
-        
+
         def solo_cb():
             print("solo")
 
@@ -217,31 +222,23 @@ class SoundLayer(Widget):
         print("[+] sound.channels", self.sound.channels)
         print("[+] sound.frame_rate", self.sound.frame_rate)
         print("[+] sound.frame_count", int(self.sound.frame_count()))
-        # s1 = self.sound[:, 0] # left channel
+
         for chunks in make_chunks(self.sound, int(self.sound.frame_count())):
             samps = chunks.get_array_of_samples()
             left = np.array(samps[::2])  # left ch
-            
 
-        player = pyaudio.PyAudio()
-        stream = player.open(format=SAMPLE_WIDTH,
-                             channels=1,
-                             rate=int(FRAME_RATE/2),
-                             output=True)
-        ret = fftutils.get_fft_from_channel(left, fft_size=fft_size)
-        back = fftutils.get_channel_from_fft(left, fft_size=fft_size)
-        stream.write(back)
-        gamma = 2.0
-
+        fbins = fftutils.time_to_freq(left, fft_size=fft_size)
+        self.fbins = fbins
+        ret = fbins[:, :fft_size]
+        frames_num = ret.shape[0]
+        ret = np.abs(ret)
+        ret = 20 * np.log10(ret)          # scale to db
         ret = np.clip(ret, -40, 200)    # clip values
         ret = ret + 40  # to pix
-        # result = np.power((result / 255), (1 / gamma)) * 255
-
-        
-
-        ret = np.uint8(np.concatenate(ret.T)).reshape(fft_size, len(ret))[::-1, :]
+        ret = np.concatenate(ret.T)  # join frames and tilt
+        ret = np.uint8(ret).reshape(fft_size, frames_num)  # reshape as bins/time
+        ret = ret[::-1, :]  # flip vertically for PIL
         return ret
-        # import pdb; pdb.set_trace()
 
 
 class AudioWindow(Window):
@@ -293,7 +290,6 @@ class AudioCanvas(GLCanvas):
                     if (abs(uv.x - marker) <= 0.001) {
                         color = vec4(1.0 - color.x, 1.0 - color.y, 1.0 - color.z, 1.0);
                     }
-                    
                 }
             }"""
         )
@@ -302,7 +298,7 @@ class AudioCanvas(GLCanvas):
         # ####################
         # 3##################4
         # Draw a cube
-        
+
         indices2 = np.array(
             [[0, 2],
              [1, 3],
@@ -323,7 +319,6 @@ class AudioCanvas(GLCanvas):
         self.shader.uploadIndices(indices2)
 
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
-        # gl.glHint(gl.GL_GENERATE_MIPMAP_HINT, gl.GL_FASTEST)
         self.videotexid = gl.glGenTextures(1)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.videotexid)
@@ -332,13 +327,6 @@ class AudioCanvas(GLCanvas):
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT)
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
-
-        # self.im = Image.open('spect.png').convert('RGB')
-        # textureData = np.array(self.im)
-        # self.width = self.im.size[0]
-        # self.height = self.im.size[1]
-        # glu.gluBuild2DMipmaps(gl.GL_TEXTURE_2D, gl.GL_RGB, self.width, self.height, gl.GL_RGB,
-                            #   gl.GL_UNSIGNED_BYTE, textureData)
 
         self.shader.uploadAttrib("position", positions2)
         self.shader.uploadAttrib("in_uvs", uvs)
@@ -377,7 +365,6 @@ class AudioCanvas(GLCanvas):
             glu.gluBuild2DMipmaps(gl.GL_TEXTURE_2D, gl.GL_RGB, width, height, gl.GL_RGB,
                                   gl.GL_UNSIGNED_BYTE, textureData)
             self.drawGL()
-            
 
     def drawContents(self):
         # print("[+] AudioCanvas::drawContents")
@@ -417,7 +404,6 @@ class PlaybackWindow(Window):
         self.setLayout(GroupLayout())
         self.setFixedSize((400, 400))
 
-
         Label(self, "Location", "sans-bold")
         panel = Widget(self)
         panel.setLayout(BoxLayout(Orientation.Horizontal, Alignment.Middle, 0, 0))
@@ -438,7 +424,6 @@ class PlaybackWindow(Window):
         self.total_framestb.setFontSize(14)
         self.total_framestb.setAlignment(TextBox.Alignment.Right)
 
-        
         Label(self, "Controls", "sans-bold")
         panel = Widget(self)
         panel.setLayout(BoxLayout(Orientation.Horizontal, Alignment.Minimum, 0, 0))
@@ -492,7 +477,7 @@ class NomixApp(Screen):
             if index == (tabWidget.tabCount()-1):
                 global counter
                 # When the "+" tab has been clicked, simply add a new tab.
-                tabName  = "Dynamic {0}".format(counter)
+                tabName = "Dynamic {0}".format(counter)
                 layerDyn = tabWidget.createTab(index, tabName)
                 layerDyn.setLayout(GroupLayout())
                 Label(layerDyn, "Function graph widget", "sans-bold")
@@ -505,14 +490,14 @@ class NomixApp(Screen):
                              for i in range(100)]
                 graphDyn.setValues(valuesDyn)
                 counter += 1
-                # We must invoke perform layout from the screen instance to keep everything in order.
-                # This is essential when creating tabs dynamically.
+                # We must invoke perform layout from the screen instance to keep everything
+                # in order. This is essential when creating tabs dynamically.
                 self.performLayout()
                 # Ensure that the newly added header is visible on screen
                 tabWidget.ensureTabVisible(index)
 
         tabWidget.setCallback(tab_cb)
-        tabWidget.setActiveTab(0);
+        tabWidget.setActiveTab(0)
 
         window = Window(self, "Grid of small widgets")
         window.setPosition((425, 330))
@@ -656,4 +641,3 @@ if __name__ == "__main__":
     del nomix
     gc.collect()
     nanogui.shutdown()
-
