@@ -7,6 +7,10 @@ from pydub.utils import make_chunks
 
 
 def time_to_freq(channel, fft_size=128, overlap_fac=0.5):
+    """
+    was taken from here:
+    https://kevinsprojects.wordpress.com/2014/12/13/short-time-fourier-transform-using-python-and-numpy/
+    """
     print('[+] time_to_freq')
     hop_size = np.int32(np.floor(fft_size * (1-overlap_fac)))
     # The last segment can overlap the end of the data array by no more than one window size
