@@ -11,7 +11,7 @@ def time_to_freq(channel, fft_size=128, overlap_fac=0.5):
     was taken from here:
     https://kevinsprojects.wordpress.com/2014/12/13/short-time-fourier-transform-using-python-and-numpy/
     """
-    print('[+] time_to_freq')
+    print('[+] time_to_freq', fft_size, channel.shape)
     hop_size = np.int32(np.floor(fft_size * (1-overlap_fac)))
     # The last segment can overlap the end of the data array by no more than one window size
     pad_end_size = fft_size
@@ -34,25 +34,27 @@ def time_to_freq(channel, fft_size=128, overlap_fac=0.5):
         spectrum = np.fft.fft(padded)                     # take the Fourier Transform
         spectrum = spectrum / fft_size                    # scale by the number of samples
         result[i, :] = spectrum               # append to the results array
-
+    print('[+] out:', result.shape)
     return result
 
 
-def freq_to_time(bins, fft_size=128, overlap_fac=0.5, orig=None):
-    print('[+] freq_to_time')
+def freq_to_time(bins, fft_size=128, overlap_fac=0.5, orig=None, dtype=np.int16):
+    print('[+] freq_to_time', fft_size, bins.shape)
     hop_size = np.int32(np.floor(fft_size * (1-overlap_fac)))
     pad_end_size = fft_size
     total_segments = np.int32(np.ceil(len(bins) / np.float32(hop_size)))
 
     window = np.hanning(fft_size)
-    result = np.empty((len(bins) * fft_size), dtype=np.int16)
+    res_size = int(len(bins) * fft_size * overlap_fac) + fft_size + 1
+    result = np.empty(res_size, dtype=dtype)
 
     for i in range(len(bins)):
         scaled = bins[i] * fft_size
         padded = np.fft.ifft(scaled).real
         windowed = padded[:-fft_size]
         segment = windowed / window
-        pcm = segment.astype('uint16')
+        pcm = segment.astype(dtype)
         result[int(i*fft_size*overlap_fac):int(i*fft_size*overlap_fac)+fft_size] = pcm[:fft_size]
 
+    print('[+] out:', result.shape)
     return result

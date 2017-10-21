@@ -38,11 +38,11 @@ import pyaudio
 from pydub import AudioSegment
 from pydub.utils import make_chunks
 import pyfftw
-
+import threading
 
 import argparse
 
-pyfftw.interfaces.cache.enable()
+# pyfftw.interfaces.cache.enable()
 
 
 # A simple counter, used for dynamic tab creation with TabWidget callback
@@ -51,29 +51,100 @@ counter = 1
 SAMPLE_WIDTH = 2
 CHANNELS = 2
 FRAME_RATE = 44100
+CHUNK_SIZE = 1024
+FFT_SIZE = 2048
+
+
+def open_song_from_file(file_path):
+    song = AudioSegment.from_file(file_path)
+    song.set_frame_rate(FRAME_RATE)
+    song.set_sample_width(SAMPLE_WIDTH)
+    song.set_channels(CHANNELS)
+    return song
+
+
+class NomixPlayer(threading.Thread):
+    """
+    A simple class based on PyAudio and pydub to play in a loop in the backgound
+    """
+    def __init__(self, frame_update_cb, loop=True):
+        """
+        Initialize `NomixPlayer` class.
+        """
+        super(NomixPlayer, self).__init__()
+        self.loop = False
+        # Open an audio segment
+
+        self.track = None
+        self.should_stop = False
+        self.frame_update_cb = frame_update_cb
+
+    def stream_callback(self, sin_data, frame_count, time_info, status):
+        print('[+] NomixPlayer:stream_callback', time_info)
+        data = wf.readframes(frame_count)
+        return (data, pyaudio.paContinue)
+
+    def run(self):
+        print('[+] NomixPlayer:run')
+        # PLAYBACK LOOP
+        current = 0
+        self.data_ptr = 0
+        player = pyaudio.PyAudio()
+        stream = player.open(format=player.get_format_from_width(SAMPLE_WIDTH),
+                             channels=CHANNELS,
+                             rate=FRAME_RATE,
+                             output=True,
+                             stream_callback=self.stream_callback)
+        self.start = time.time()
+        self.current = 0.0
+        while not self.should_stop:
+            # print('[+] not stopping..')
+            if self.current > len(self.track):
+                print("[+] checking loop..")
+                if self.loop:
+                    self.current = 0
+                    continue
+                break
+            data = self.track[self.data_ptr:self.data_ptr+CHUNK_SIZE].tobytes()
+            self.data_ptr += CHUNK_SIZE
+            import pdb; pdb.set_trace()
+            stream.write(data)
+            self.current = time.time() - self.start
+            self.frame_update_cb(int(FRAME_RATE * self.current))
+
+        stream.close()
+        player.terminate()
+
+    def jump_to_frame(self, frame):
+        print('[+] NomixPlayer:jump_to_frame', frame)
+        self.current = int(frame / FRAME_RATE)
+        self.data_ptr = self.current
+
+    def play(self, track):
+        """
+        Just another name for self.start()
+        """
+        self.track = track
+        self.should_stop = False
+        self.start()
+
+    def stop(self):
+        """
+        Stop playback. 
+        """
+        self.should_stop = True
 
 
 class AudioEngine:
     def __init__(self):
-        self.player = None
-        self.stream = None
-        self.layers = []
+        self.layer_list = None
+        self.pbwindow = None
+        self.audwindow = None
         self.img_cache = []
         self.sound_cache = []
-
-    def init_player(self):
-        if self.player and self.stream:
-            return
-
-        self.player = pyaudio.PyAudio()
-
-        self.stream = player.open(format=SAMPLE_WIDTH,
-                                  channels=CHANNELS,
-                                  rate=FRAME_RATE,
-                                  output=True)
-
-    def set_marker(self, marker):
-        self.marker = marker
+        self.total_frames = 1
+        self.player = 0
+        self.start_frame = 0
 
     def read_output(self, frames):
         print('[+] AudioEngine:: read_output')
@@ -81,21 +152,69 @@ class AudioEngine:
     def get_visualized_output(self):
         print('[+] AudioEngine:: get_visualized_output')
 
+    def _update_total_frames(self):
+        print('[+] AudioEngine::_update_total_frames')
+        if self.pbwindow is None:
+            # print('[+] self.pbwindow is None')
+            return
+        if self.layer_list is None:
+            # print('[+] self.layer_list is None')
+            return
+        framenum = self.layer_list.get_number_of_frames()
+        self.total_frames = framenum
+        self.pbwindow.total_framestb.setValue(str(framenum))
+
+    def jump_to_frame(self, frame):
+        print('[+] AudioEngine::jump_to_frame', frame)
+        if self.player:
+            self.player.jump_to_frame(frame)
+        self.start_frame = frame
+        self.audwindow.set_cursor(frame/self.total_frames)
+        self.time_update_callback(frame)
+
+    def set_layer_list(self, layer_list):
+        self.layer_list = layer_list
+        self._update_total_frames()
+
+    def set_playback_window(self, pbwindow):
+        self.pbwindow = pbwindow
+        self._update_total_frames()
+
+    def set_audio_window(self, audwindow):
+        self.audwindow = audwindow
+
+        def callback(cursor):
+            self.jump_to_frame(int(self.total_frames * cursor))
+
+        self.audwindow.set_on_cursor_change_callback(callback)
+
+    def time_update_callback(self, frames):
+        # print('[+] AudioEngine:: time_update_callback', frames)
+        self.pbwindow.frametb.setValue(str(frames))
+        self.audwindow.set_cursor(frames/self.total_frames)
+        self.start_frame = 0
+
     def on_new_layer(self, layer):
-        print('[+] AudioEngine:: on_new_layer')
+        print('[+] AudioEngine:: on_new_layer', layer)
+        self._update_total_frames()
+        
+
+    def play(self):
+        self.player = NomixPlayer(self.time_update_callback)
+        self.player.jump_to_frame(self.start_frame)
+        self.player.play(self.layer_list.flatten())
 
 
 class LayersWindow(Window):
-    def __init__(self, parent, engine, width=400):
+    def __init__(self, parent, width=400):
         super(LayersWindow, self).__init__(parent, 'Layers')
         self.setLayout(GridLayout(orientation=Orientation.Vertical))
 
         SCROLL_BAR = 100
         self.layers_scroll = VScrollPanel(self)
         self.layers_scroll.setFixedSize((width, 600))
-        self.layers = LayersList(self.layers_scroll, engine)
+        self.layers = LayersList(self.layers_scroll)
         self.redraw_spec_cb = None
-        self.engine = engine
 
         right_align = Widget(self)
         right_align.setLayout(GridLayout())
@@ -134,12 +253,12 @@ def hex_to_rgb(h):
 
 
 class LayersList(Widget):
-    def __init__(self, parent, engine):
+    def __init__(self, parent):
         super(LayersList, self).__init__(parent)
         self.setLayout(GroupLayout())
         self.layers = []
         self.shouldPerformLayout = False
-        self.engine = engine
+        self.engine = None
         self.colorchoices = []
         self.colorchoices.append('f5a430')
         self.colorchoices.append('f56332')
@@ -154,6 +273,9 @@ class LayersList(Widget):
 
         self.setFixedSize((400, 0))
 
+    def set_engine(self, engine):
+        self.engine = engine
+
     def add_layer(self, name, file_path=None):
         valid = [("mp3", ""), ("wav", "")]
         if not file_path:
@@ -162,7 +284,7 @@ class LayersList(Widget):
         if not os.path.isfile(file_path):
             RuntimeError("Selected file isn't in place", result)
 
-        song = AudioSegment.from_file(file_path)
+        song = open_song_from_file(file_path)
         shuffle(self.colorchoices)
         h = self.colorchoices.pop()
         print(h)
@@ -171,7 +293,8 @@ class LayersList(Widget):
         sl = SoundLayer(self, name, song, color)
         self.layers.append(sl)
         self.shouldPerformLayout = True
-        self.engine.on_new_layer(sl)
+        if self.engine:
+            self.engine.on_new_layer(sl)
 
     def draw(self, ctx):
         if self.shouldPerformLayout:
@@ -180,6 +303,32 @@ class LayersList(Widget):
             self.shouldPerformLayout = False
         super(LayersList, self).draw(ctx)
 
+    def get_number_of_frames(self):
+        frames = 0
+        for layer in self.layers:
+            l, r = layer.get_channels()
+            frames = max(frames, len(l))
+        return frames
+
+    def flatten(self, fft_size=FFT_SIZE):
+        max_layer = 0
+        for layer in self.layers:
+            l, r = layer.get_bins(fft_size)
+            max_layer = max(max_layer, len(l))
+
+        out_l = np.zeros((max_layer, fft_size*2), dtype=np.complex128)
+        out_r = np.zeros((max_layer, fft_size*2), dtype=np.complex128)
+        for layer in self.layers:
+            l, r = layer.get_bins(fft_size)
+            out_l += l
+            out_r += r
+        out_l = fftutils.freq_to_time(out_l, fft_size=FFT_SIZE)
+        # import pdb; pdb.set_trace()
+        out_r = fftutils.freq_to_time(out_r, fft_size=FFT_SIZE)
+        return np.vstack((out_l, out_r)).T.flatten()
+        # return out_l
+        # return self.layers[0].get_channels()
+        
 
 class SoundLayer(Widget):
     def __init__(self, parent, name, sound, color):
@@ -217,18 +366,14 @@ class SoundLayer(Widget):
 
         self.setFixedSize((400, 40))
 
-    def get_spect_image(self, fft_size, zoom=1, offset=0):
+    def get_spect_image(self, fft_size=FFT_SIZE, zoom=1, offset=0):
         print("[+] sound.sample_width", self.sound.sample_width)
         print("[+] sound.channels", self.sound.channels)
         print("[+] sound.frame_rate", self.sound.frame_rate)
         print("[+] sound.frame_count", int(self.sound.frame_count()))
 
-        for chunks in make_chunks(self.sound, int(self.sound.frame_count())):
-            samps = chunks.get_array_of_samples()
-            left = np.array(samps[::2])  # left ch
-
-        fbins = fftutils.time_to_freq(left, fft_size=fft_size)
-        self.fbins = fbins
+        fbins, rbins = self.get_bins(fft_size)
+        
         ret = fbins[:, :fft_size]
         frames_num = ret.shape[0]
         ret = np.abs(ret)
@@ -240,6 +385,19 @@ class SoundLayer(Widget):
         ret = ret[::-1, :]  # flip vertically for PIL
         return ret
 
+    def get_channels(self):
+        for chunks in make_chunks(self.sound, int(self.sound.frame_count())):
+            samps = chunks.get_array_of_samples()
+            left = np.array(samps[::2])  # left ch
+            right = np.array(samps[1::2])
+        return left, right
+
+    def get_bins(self, fft_size=FFT_SIZE):
+        left, right = self.get_channels()
+        self.l_bins = fftutils.time_to_freq(left, fft_size=fft_size)
+        self.r_bins = fftutils.time_to_freq(right, fft_size=fft_size)
+        return self.l_bins, self.r_bins
+
 
 class AudioWindow(Window):
     def __init__(self, parent):
@@ -248,6 +406,12 @@ class AudioWindow(Window):
         self.setLayout(GroupLayout())
         self.canvas = AudioCanvas(self)
 
+    def set_cursor(self, cursor):
+        self.canvas.cursor = cursor
+
+    def set_on_cursor_change_callback(self, cb):
+        self.canvas.on_cursor_change_cb = cb
+
 
 class AudioCanvas(GLCanvas):
     def __init__(self, parent):
@@ -255,9 +419,10 @@ class AudioCanvas(GLCanvas):
         self.rotation = [0.25, 0.5, 0.33]
         self.shader = GLShader()
         self.color = (1.0, 1.0, 1.0)
-        self.marker = 0
+        self.cursor = 0
         self.frames = 10000
         self.left_click_down = False
+        self.on_cursor_change_cb = None
         self.shader.init(
             # An identifying name
             "a_simple_shader",
@@ -278,7 +443,7 @@ class AudioCanvas(GLCanvas):
             """#version 330
             uniform sampler2D image;
             uniform vec3 in_color;
-            uniform float marker;
+            uniform float cursor;
             in vec2 uv;
             out vec4 color;
             void main() {
@@ -286,8 +451,8 @@ class AudioCanvas(GLCanvas):
                 color = vec4(current.x * in_color.x,
                              current.y * in_color.y,
                              current.z * in_color.z, 1.0);
-                if (marker > 0) {
-                    if (abs(uv.x - marker) <= 0.001) {
+                if (cursor > 0) {
+                    if (abs(uv.x - cursor) <= 0.001) {
                         color = vec4(1.0 - color.x, 1.0 - color.y, 1.0 - color.z, 1.0);
                     }
                 }
@@ -333,26 +498,31 @@ class AudioCanvas(GLCanvas):
 
         self.dial = 0
         self.setSize((900, 250))
+        self.cursor = 0.0
 
     def mouseButtonEvent(self, p, button, down, modifiers):
-        print("[+] AudioCanvas::mouseButtonEvent", p, button, down, modifiers)
+        # print("[+] AudioCanvas::mouseButtonEvent", p, button, down, modifiers)
         if (button == 0):
             self.left_click_down = down
             if down:
-                self.marker = ((p[0]-15) / self.width()) * self.frames
+                self.on_cursor_change((p[0]-15) / self.width())
         return super(AudioCanvas, self).mouseButtonEvent(p, button, down, modifiers)
 
     def mouseMotionEvent(self, p, rel, button, modifiers):
-        print("[+] AudioCanvas::mouseMotionEvent", p, rel, button, modifiers)
+        # print("[+] AudioCanvas::mouseMotionEvent", p, rel, button, modifiers)
         if self.left_click_down:
-            self.marker = ((p[0]-15) / self.width()) * self.frames
+            self.on_cursor_change((p[0]-15) / self.width())
         return super(AudioCanvas, self).mouseMotionEvent(p, rel, button, modifiers)
+
+    def on_cursor_change(self, cursor):
+        if self.on_cursor_change_cb:
+            self.on_cursor_change_cb(cursor)
 
     def draw_spect(self, layers):
         print("[+] AudioCanvas::draw_spect", layers)
         for layer in layers:
             self.color = (layer.color.r, layer.color.g, layer.color.b)
-            textureData = layer.get_spect_image(fft_size=2048)
+            textureData = layer.get_spect_image(fft_size=FFT_SIZE)
             # import pdb; pdb.set_trace()
             width = 800
             im = Image.fromarray(textureData).resize((width, 128)).convert('RGB')
@@ -373,6 +543,7 @@ class AudioCanvas(GLCanvas):
     def drawGL(self):
         # print("[+] AudioCanvas::drawGL")
         self.shader.bind()
+
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.videotexid)
 
@@ -385,7 +556,7 @@ class AudioCanvas(GLCanvas):
 
         self.shader.setUniform("modelViewProj", mvp)
         self.shader.setUniform("in_color", self.color)
-        self.shader.setUniform("marker", self.marker/self.frames)
+        self.shader.setUniform("cursor", self.cursor)
 
         nanogui.gl.Enable(nanogui.gl.DEPTH_TEST)
         self.shader.setUniform("image", 0)
@@ -398,11 +569,12 @@ class AudioCanvas(GLCanvas):
 
 
 class PlaybackWindow(Window):
-    def __init__(self, parent):
+    def __init__(self, parent, engine):
         super(PlaybackWindow, self).__init__(parent, "Playback")
         self.setPosition((15, 330))
         self.setLayout(GroupLayout())
         self.setFixedSize((400, 400))
+        self.engine = engine
 
         Label(self, "Location", "sans-bold")
         panel = Widget(self)
@@ -412,6 +584,7 @@ class PlaybackWindow(Window):
         self.frametb.setValue("0")
         self.frametb.setFontSize(14)
         self.frametb.setAlignment(TextBox.Alignment.Right)
+        self.frametb.setEditable(True)
 
         label = Label(panel, " ", "sans-bold")
         label.setFixedSize((15, 15))
@@ -423,6 +596,7 @@ class PlaybackWindow(Window):
         self.total_framestb.setValue("1000")
         self.total_framestb.setFontSize(14)
         self.total_framestb.setAlignment(TextBox.Alignment.Right)
+        self.total_framestb.setEditable(True)
 
         Label(self, "Controls", "sans-bold")
         panel = Widget(self)
@@ -430,7 +604,13 @@ class PlaybackWindow(Window):
         ToolButton(panel, entypo.ICON_CONTROLLER_FAST_BACKWARD)
         ToolButton(panel, entypo.ICON_CONTROLLER_STOP)
         # ToolButton(panel, entypo.ICON_CONTROLLER_PAUS)
-        ToolButton(panel, entypo.ICON_CONTROLLER_PLAY)
+        tb = ToolButton(panel, entypo.ICON_CONTROLLER_PLAY)
+
+        def cb():
+            print('Play')
+            self.engine.play()
+
+        tb.setCallback(cb)
         ToolButton(panel, entypo.ICON_CONTROLLER_FAST_FORWARD)
 
 
@@ -438,13 +618,17 @@ class NomixApp(Screen):
     def __init__(self):
         super(NomixApp, self).__init__((1440, 900), "Nomix")
 
-        self.engine = AudioEngine()
-
         self.audio_window = AudioWindow(self)
-        self.layers_window = LayersWindow(self, self.engine)
+        self.layers_window = LayersWindow(self)
+        self.engine = AudioEngine()
+        self.layers_window.layers.set_engine(self.engine)
         self.layers_window.redraw_spec_cb = self.redraw_spect
-
-        self.pbwindow = PlaybackWindow(self)
+        
+        self.pbwindow = PlaybackWindow(self, self.engine)
+        
+        self.engine.set_layer_list(self.layers_window.layers)
+        self.engine.set_playback_window(self.pbwindow)
+        self.engine.set_audio_window(self.audio_window)
 
         window = Window(self, "Misc. widgets")
         window.setPosition((675, 330))
