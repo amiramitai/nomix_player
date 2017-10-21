@@ -63,78 +63,6 @@ def open_song_from_file(file_path):
     return song
 
 
-class NomixPlayer(threading.Thread):
-    """
-    A simple class based on PyAudio and pydub to play in a loop in the backgound
-    """
-    def __init__(self, frame_update_cb, loop=True):
-        """
-        Initialize `NomixPlayer` class.
-        """
-        super(NomixPlayer, self).__init__()
-        self.loop = False
-        # Open an audio segment
-
-        self.track = None
-        self.should_stop = False
-        self.frame_update_cb = frame_update_cb
-
-    def stream_callback(self, sin_data, frame_count, time_info, status):
-        print('[+] NomixPlayer:stream_callback', time_info)
-        data = wf.readframes(frame_count)
-        return (data, pyaudio.paContinue)
-
-    def run(self):
-        print('[+] NomixPlayer:run')
-        # PLAYBACK LOOP
-        current = 0
-        self.data_ptr = 0
-        player = pyaudio.PyAudio()
-        stream = player.open(format=player.get_format_from_width(SAMPLE_WIDTH),
-                             channels=CHANNELS,
-                             rate=FRAME_RATE,
-                             output=True,
-                             stream_callback=self.stream_callback)
-        self.start = time.time()
-        self.current = 0.0
-        while not self.should_stop:
-            # print('[+] not stopping..')
-            if self.current > len(self.track):
-                print("[+] checking loop..")
-                if self.loop:
-                    self.current = 0
-                    continue
-                break
-            data = self.track[self.data_ptr:self.data_ptr+CHUNK_SIZE].tobytes()
-            self.data_ptr += CHUNK_SIZE
-            import pdb; pdb.set_trace()
-            stream.write(data)
-            self.current = time.time() - self.start
-            self.frame_update_cb(int(FRAME_RATE * self.current))
-
-        stream.close()
-        player.terminate()
-
-    def jump_to_frame(self, frame):
-        print('[+] NomixPlayer:jump_to_frame', frame)
-        self.current = int(frame / FRAME_RATE)
-        self.data_ptr = self.current
-
-    def play(self, track):
-        """
-        Just another name for self.start()
-        """
-        self.track = track
-        self.should_stop = False
-        self.start()
-
-    def stop(self):
-        """
-        Stop playback. 
-        """
-        self.should_stop = True
-
-
 class AudioEngine:
     def __init__(self):
         self.layer_list = None
@@ -143,8 +71,42 @@ class AudioEngine:
         self.img_cache = []
         self.sound_cache = []
         self.total_frames = 1
-        self.player = 0
         self.start_frame = 0
+
+        # PLAYER
+        self.data_ptr = None
+        self.player = None
+        self.stream = None
+        self.is_playing = False
+        self.start_time = time.time()
+
+    def init_stream(self):
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        if self.player:
+            self.player.terminate()
+            self.player = None
+        self.data_ptr = self.start_frame * CHANNELS
+        self.player = pyaudio.PyAudio()
+        self.start_time = time.time()
+        # print("[+] start_time = ", self.start_time)
+        self.stream = self.player.open(format=self.player.get_format_from_width(SAMPLE_WIDTH),
+                                       channels=CHANNELS,
+                                       rate=FRAME_RATE,
+                                       output=True,
+                                       stream_callback=self.stream_callback)
+
+    def stream_callback(self, sin_data, frame_count, time_info, status):
+        # print('[+] NomixPlayer::stream_callback', time_info)
+        if self.track is not None and self.is_playing:
+            data = self.track[self.data_ptr:self.data_ptr + (frame_count * CHANNELS)]
+            self.data_ptr += len(data)
+            time_passed = time.time() - self.start_time
+            self.time_update_callback(self.start_frame + int(time_passed * FRAME_RATE))
+            return (data, pyaudio.paContinue)
+        print('[+] finishing stream')
+        return (None, pyaudio.paComplete)
 
     def read_output(self, frames):
         print('[+] AudioEngine:: read_output')
@@ -166,9 +128,10 @@ class AudioEngine:
 
     def jump_to_frame(self, frame):
         print('[+] AudioEngine::jump_to_frame', frame)
-        if self.player:
-            self.player.jump_to_frame(frame)
-        self.start_frame = frame
+        if self.is_playing:
+            self.play(start_frame=frame)
+        else:
+            self.start_frame = frame
         self.audwindow.set_cursor(frame/self.total_frames)
         self.time_update_callback(frame)
 
@@ -192,17 +155,20 @@ class AudioEngine:
         # print('[+] AudioEngine:: time_update_callback', frames)
         self.pbwindow.frametb.setValue(str(frames))
         self.audwindow.set_cursor(frames/self.total_frames)
-        self.start_frame = 0
 
     def on_new_layer(self, layer):
         print('[+] AudioEngine:: on_new_layer', layer)
         self._update_total_frames()
         
 
-    def play(self):
-        self.player = NomixPlayer(self.time_update_callback)
-        self.player.jump_to_frame(self.start_frame)
-        self.player.play(self.layer_list.flatten())
+    def play(self, start_frame=0):
+        self.start_frame = start_frame
+        self.track = self.layer_list.get_mixdown()
+        self.is_playing = True
+        self.init_stream()
+        # self.player = NomixPlayer(self.time_update_callback)
+        # self.player.jump_to_frame(self.start_frame)
+        # self.player.play(self.layer_list.flatten())
 
 
 class LayersWindow(Window):
@@ -273,6 +239,15 @@ class LayersList(Widget):
 
         self.setFixedSize((400, 0))
 
+        self.cache = None
+
+    def get_mixdown(self):
+        if self.cache is not None:
+            return self.cache
+
+        self.cache = self.flatten()
+        return self.cache
+
     def set_engine(self, engine):
         self.engine = engine
 
@@ -314,17 +289,24 @@ class LayersList(Widget):
         max_layer = 0
         for layer in self.layers:
             l, r = layer.get_bins(fft_size)
-            max_layer = max(max_layer, len(l))
+            max_layer = max(max_layer, l.shape[0])
 
         out_l = np.zeros((max_layer, fft_size*2), dtype=np.complex128)
         out_r = np.zeros((max_layer, fft_size*2), dtype=np.complex128)
+        total_layers = 0
         for layer in self.layers:
+            total_layers += 1
             l, r = layer.get_bins(fft_size)
+            if l.shape[0] < max_layer:
+                s = max_layer - l.shape[0]
+                to_pad = np.zeros((s, fft_size*2), dtype=np.complex128)
+                l = np.vstack((l, to_pad))
+                r = np.vstack((r, to_pad))
             out_l += l
             out_r += r
-        out_l = fftutils.freq_to_time(out_l, fft_size=FFT_SIZE)
+        out_l = fftutils.freq_to_time(out_l / total_layers, fft_size=FFT_SIZE)
         # import pdb; pdb.set_trace()
-        out_r = fftutils.freq_to_time(out_r, fft_size=FFT_SIZE)
+        out_r = fftutils.freq_to_time(out_r / total_layers, fft_size=FFT_SIZE)
         return np.vstack((out_l, out_r)).T.flatten()
         # return out_l
         # return self.layers[0].get_channels()
@@ -819,6 +801,7 @@ if __name__ == "__main__":
         nomix.add_layer(audiofile)
     if args.audiofiles:
         nomix.redraw_spect()
+    # nomix.engine.play()
     nomix.drawAll()
     nomix.setVisible(True)
     nanogui.mainloop()
