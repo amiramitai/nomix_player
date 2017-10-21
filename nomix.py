@@ -20,6 +20,8 @@ import OpenGL.GLU as glu
 import os
 from random import shuffle
 from PIL import Image
+import _thread
+
 
 from scipy.fftpack import fft, fftfreq
 import fftutils
@@ -44,6 +46,13 @@ import argparse
 
 # pyfftw.interfaces.cache.enable()
 
+
+def nomix_set_status(status):
+    if not _nomix_set_status:
+        return
+    _nomix_set_status(status)
+
+_nomix_set_status = None
 
 # A simple counter, used for dynamic tab creation with TabWidget callback
 counter = 1
@@ -160,15 +169,38 @@ class AudioEngine:
         print('[+] AudioEngine:: on_new_layer', layer)
         self._update_total_frames()
         
-
     def play(self, start_frame=0):
         self.start_frame = start_frame
-        self.track = self.layer_list.get_mixdown()
-        self.is_playing = True
-        self.init_stream()
+        nomix_set_status('[+] Getting mixdown.. please wait..')
+        
+        def _init_with_mixdown():
+            self.track = self.layer_list.get_mixdown()
+            nomix_set_status('[+] Initializing stream..')
+            self.is_playing = True
+            self.init_stream()
+            nomix_set_status('[+] Done.')
+        
+        args = ()
+        _thread.start_new_thread(_init_with_mixdown, args)
         # self.player = NomixPlayer(self.time_update_callback)
         # self.player.jump_to_frame(self.start_frame)
         # self.player.play(self.layer_list.flatten())
+
+
+class StatusWindow(Window):
+    def __init__(self, parent):
+        global nomix_set_status
+        super(StatusWindow, self).__init__(parent, 'Status')
+        # self.setLayout(GridLayout(orientation=Orientation.Vertical))
+        self.setSize((1410, 90))
+        self.setPosition((15, 750))
+        self.label = Label(self, '', "sans-bold")
+        self.label.setFixedSize((1400, 50))
+        self.label.setPosition((15, 50))
+        nomix_set_status = self.set_status
+
+    def set_status(self, status):
+        self.label.setCaption(status)
 
 
 class LayersWindow(Window):
@@ -600,6 +632,7 @@ class NomixApp(Screen):
     def __init__(self):
         super(NomixApp, self).__init__((1440, 900), "Nomix")
 
+        self.status = StatusWindow(self)
         self.audio_window = AudioWindow(self)
         self.layers_window = LayersWindow(self)
         self.engine = AudioEngine()
@@ -724,42 +757,42 @@ class NomixApp(Screen):
 
         # setup a fast callback for the color picker widget on a new window
         # for demonstrative purposes
-        window = Window(self, "Color Picker Fast Callback")
-        layout = GridLayout(Orientation.Horizontal, 2,
-                            Alignment.Middle, 15, 5)
-        layout.setColAlignment(
-            [Alignment.Maximum, Alignment.Fill])
-        layout.setSpacing(0, 10)
-        window.setLayout(layout)
-        window.setPosition((425, 515))
-        window.setFixedSize((235, 300))
-        Label(window, "Combined: ")
-        b = Button(window, "ColorWheel", entypo.ICON_500PX)
-        Label(window, "Red: ")
-        redIntBox = IntBox(window)
-        redIntBox.setEditable(False)
-        Label(window, "Green: ")
-        greenIntBox = IntBox(window)
-        greenIntBox.setEditable(False)
-        Label(window, "Blue: ")
-        blueIntBox = IntBox(window)
-        blueIntBox.setEditable(False)
-        Label(window, "Alpha: ")
-        alphaIntBox = IntBox(window)
+        # window = Window(self, "Color Picker Fast Callback")
+        # layout = GridLayout(Orientation.Horizontal, 2,
+        #                     Alignment.Middle, 15, 5)
+        # layout.setColAlignment(
+        #     [Alignment.Maximum, Alignment.Fill])
+        # layout.setSpacing(0, 10)
+        # window.setLayout(layout)
+        # window.setPosition((425, 515))
+        # window.setFixedSize((235, 300))
+        # Label(window, "Combined: ")
+        # b = Button(window, "ColorWheel", entypo.ICON_500PX)
+        # Label(window, "Red: ")
+        # redIntBox = IntBox(window)
+        # redIntBox.setEditable(False)
+        # Label(window, "Green: ")
+        # greenIntBox = IntBox(window)
+        # greenIntBox.setEditable(False)
+        # Label(window, "Blue: ")
+        # blueIntBox = IntBox(window)
+        # blueIntBox.setEditable(False)
+        # Label(window, "Alpha: ")
+        # alphaIntBox = IntBox(window)
 
-        def cp_fast_cb(color):
-            b.setBackgroundColor(color)
-            b.setTextColor(color.contrastingColor())
-            red = int(color.r * 255.0)
-            redIntBox.setValue(red)
-            green = int(color.g * 255.0)
-            greenIntBox.setValue(green)
-            blue = int(color.b * 255.0)
-            blueIntBox.setValue(blue)
-            alpha = int(color.w * 255.0)
-            alphaIntBox.setValue(alpha)
+        # def cp_fast_cb(color):
+        #     b.setBackgroundColor(color)
+        #     b.setTextColor(color.contrastingColor())
+        #     red = int(color.r * 255.0)
+        #     redIntBox.setValue(red)
+        #     green = int(color.g * 255.0)
+        #     greenIntBox.setValue(green)
+        #     blue = int(color.b * 255.0)
+        #     blueIntBox.setValue(blue)
+        #     alpha = int(color.w * 255.0)
+        #     alphaIntBox.setValue(alpha)
 
-        cp.setCallback(cp_fast_cb)
+        # cp.setCallback(cp_fast_cb)
 
         self.performLayout()
 
@@ -802,6 +835,7 @@ if __name__ == "__main__":
     if args.audiofiles:
         nomix.redraw_spect()
     # nomix.engine.play()
+    nomix_set_status('[+] Initialized')
     nomix.drawAll()
     nomix.setVisible(True)
     nanogui.mainloop()
