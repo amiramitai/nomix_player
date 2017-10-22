@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.io.wavfile as wf
+from scipy import signal
 
 from pydub import AudioSegment
 from pydub.utils import make_chunks
@@ -18,7 +19,8 @@ def time_to_freq(channel, fft_size=128, overlap_fac=0.5):
     total_segments = np.int32(np.ceil(len(channel) / np.float32(hop_size)))
 
     # our half cosine window
-    window = np.hanning(fft_size)
+    # window = np.blackman(fft_size)
+    window = signal.blackmanharris(fft_size)
     # the zeros which will be used to double each segment size
     inner_pad = np.zeros(fft_size)
 
@@ -44,7 +46,8 @@ def freq_to_time(bins, fft_size=128, overlap_fac=0.5, orig=None, dtype=np.int16)
     pad_end_size = fft_size
     total_segments = np.int32(np.ceil(len(bins) / np.float32(hop_size)))
 
-    window = np.hanning(fft_size)
+    # window = np.blackman(fft_size)
+    window = signal.blackmanharris(fft_size)
     res_size = int(len(bins) * fft_size * overlap_fac) + fft_size + 1
     result = np.empty(res_size, dtype=dtype)
 

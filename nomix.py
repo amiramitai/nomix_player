@@ -62,6 +62,7 @@ CHANNELS = 2
 FRAME_RATE = 44100
 CHUNK_SIZE = 1024
 FFT_SIZE = 2048
+FFW_AMOUNT = 50000
 
 
 def open_song_from_file(file_path):
@@ -80,7 +81,6 @@ class AudioEngine:
         self.img_cache = []
         self.sound_cache = []
         self.total_frames = 1
-        self.start_frame = 0
 
         # PLAYER
         self.data_ptr = None
@@ -88,6 +88,7 @@ class AudioEngine:
         self.stream = None
         self.is_playing = False
         self.start_time = time.time()
+        self.start_frame = 0
 
     def init_stream(self):
         if self.stream:
@@ -99,23 +100,36 @@ class AudioEngine:
         self.data_ptr = self.start_frame * CHANNELS
         self.player = pyaudio.PyAudio()
         self.start_time = time.time()
-        # print("[+] start_time = ", self.start_time)
+        # print('[+] start_time = ', self.start_time)
         self.stream = self.player.open(format=self.player.get_format_from_width(SAMPLE_WIDTH),
                                        channels=CHANNELS,
                                        rate=FRAME_RATE,
                                        output=True,
                                        stream_callback=self.stream_callback)
 
+    def set_gamma(self, gamma):
+        self.audwindow.set_gamma(gamma)
+
     def stream_callback(self, sin_data, frame_count, time_info, status):
         # print('[+] NomixPlayer::stream_callback', time_info)
-        if self.track is not None and self.is_playing:
-            data = self.track[self.data_ptr:self.data_ptr + (frame_count * CHANNELS)]
-            self.data_ptr += len(data)
-            time_passed = time.time() - self.start_time
-            self.time_update_callback(self.start_frame + int(time_passed * FRAME_RATE))
-            return (data, pyaudio.paContinue)
-        print('[+] finishing stream')
-        return (None, pyaudio.paComplete)
+        if self.track is None:
+            return (None, pyaudio.paComplete)
+
+        if not self.is_playing:
+            return (None, pyaudio.paComplete)
+           
+        dptr = self.data_ptr
+        data = self.track[dptr:dptr + (frame_count * CHANNELS)]
+        if len(data) < frame_count * CHANNELS:
+            # print('[+] end of stream detected!')
+            self.jump_to_frame(0)
+            self.is_playing = False
+            return (data, pyaudio.paComplete)
+        self.data_ptr += len(data)
+        time_passed = time.time() - self.start_time
+        self.time_update_callback(self.start_frame + int(time_passed * FRAME_RATE))
+        return (data, pyaudio.paContinue)
+        
 
     def read_output(self, frames):
         print('[+] AudioEngine:: read_output')
@@ -136,9 +150,11 @@ class AudioEngine:
         self.pbwindow.total_framestb.setValue(str(framenum))
 
     def jump_to_frame(self, frame):
-        print('[+] AudioEngine::jump_to_frame', frame)
+        # print('[+] AudioEngine::jump_to_frame', frame)
         if self.is_playing:
-            self.play(start_frame=frame)
+            self.data_ptr = frame * CHANNELS
+            self.start_frame = frame
+            self.start_time = time.time()
         else:
             self.start_frame = frame
         self.audwindow.set_cursor(frame/self.total_frames)
@@ -169,8 +185,22 @@ class AudioEngine:
         print('[+] AudioEngine:: on_new_layer', layer)
         self._update_total_frames()
         
-    def play(self, start_frame=0):
-        self.start_frame = start_frame
+    def pause(self):
+        self.is_playing = False
+
+    def get_total_frames(self):
+        return self.total_frames
+
+    def get_cursor(self):
+        return int(self.audwindow.canvas.cursor * self.total_frames)
+
+    def play(self, start_frame=None):
+            
+        self.last_play_time = time.time()
+        if start_frame is None:
+            self.start_frame = self.get_cursor()
+        else:
+            self.start_frame = start_frame
         nomix_set_status('[+] Getting mixdown.. please wait..')
         
         def _init_with_mixdown():
@@ -182,9 +212,6 @@ class AudioEngine:
         
         args = ()
         _thread.start_new_thread(_init_with_mixdown, args)
-        # self.player = NomixPlayer(self.time_update_callback)
-        # self.player.jump_to_frame(self.start_frame)
-        # self.player.play(self.layer_list.flatten())
 
 
 class StatusWindow(Window):
@@ -194,7 +221,7 @@ class StatusWindow(Window):
         # self.setLayout(GridLayout(orientation=Orientation.Vertical))
         self.setSize((1410, 90))
         self.setPosition((15, 750))
-        self.label = Label(self, '', "sans-bold")
+        self.label = Label(self, '', 'sans-bold')
         self.label.setFixedSize((1400, 50))
         self.label.setPosition((15, 50))
         nomix_set_status = self.set_status
@@ -232,7 +259,7 @@ class LayersWindow(Window):
         tb = ToolButton(tools, entypo.ICON_ADD_TO_LIST)
 
         def cb():
-            layer = self.layers.add_layer("New Layer")
+            layer = self.layers.add_layer('New Layer')
             if self.redraw_spec_cb:
                 self.redraw_spec_cb()
 
@@ -282,19 +309,30 @@ class LayersList(Widget):
 
     def set_engine(self, engine):
         self.engine = engine
+        
+    def get_focused(self):
+        for layer in self.layers:
+            if layer.is_focused():
+                return LayersList
+
+        return None
+
+    def blur_all(self):
+        for layer in self.layers:
+            layer.set_focus(False)
 
     def add_layer(self, name, file_path=None):
-        valid = [("mp3", ""), ("wav", "")]
+        valid = [('mp3', ''), ('wav', '')]
         if not file_path:
             file_path = nanogui.file_dialog(valid, False)
         # result = '/Users/amiramitai/Projects/nomix/st.mp3'
         if not os.path.isfile(file_path):
-            RuntimeError("Selected file isn't in place", result)
+            RuntimeError('Selected file isnt in place', result)
 
         song = open_song_from_file(file_path)
         shuffle(self.colorchoices)
         h = self.colorchoices.pop()
-        print(h)
+        # print(h)
         rgb = hex_to_rgb(h)
         color = Color(rgb[0], rgb[1], rgb[2], 1.0)
         sl = SoundLayer(self, name, song, color)
@@ -342,6 +380,13 @@ class LayersList(Widget):
         return np.vstack((out_l, out_r)).T.flatten()
         # return out_l
         # return self.layers[0].get_channels()
+
+    def mouseButtonEvent(self, p, button, down, modifiers):
+        ret = super(LayersList, self).mouseButtonEvent(p, button, down, modifiers)
+        if ret:
+            return ret
+        self.blur_all()
+        return False
         
 
 class SoundLayer(Widget):
@@ -350,28 +395,31 @@ class SoundLayer(Widget):
         print('[+] SoundLayer::__init__')
         self.setLayout(GridLayout(resolution=4))
         self.sound = sound
-        self.cp = Button(self, "")
+        self.cp = Button(self, '')
         self.color = color
         self.cp.setBackgroundColor(color)
-        label = Label(self, name + ":", "sans-bold")
+        label = Label(self, name + ':', 'sans-bold')
         label.setFixedSize((70, 20))
         self.cp.setFixedSize((20, 40))
         self.solomute = Widget(self)
         self.solomute.setLayout(GridLayout(resolution=3))
+        self._parent = parent
+        self._focused = False
 
         self.issolo = False
         self.ismute = False
+        self.selected_color = Color(0x3e, 0x3e, 0x3f, 0xff)
         slider = Slider(self.solomute)
         slider.setFixedSize((180, 20))
 
         def mute_cb():
-            print("mute")
+            print('mute')
 
         mute = Button(self.solomute, 'M')
         mute.setCallback(mute_cb)
 
         def solo_cb():
-            print("solo")
+            print('solo')
 
         solo = Button(self.solomute, 'S')
         solo.setCallback(solo_cb)
@@ -381,10 +429,10 @@ class SoundLayer(Widget):
         self.setFixedSize((400, 40))
 
     def get_spect_image(self, fft_size=FFT_SIZE, zoom=1, offset=0):
-        print("[+] sound.sample_width", self.sound.sample_width)
-        print("[+] sound.channels", self.sound.channels)
-        print("[+] sound.frame_rate", self.sound.frame_rate)
-        print("[+] sound.frame_count", int(self.sound.frame_count()))
+        print('[+] sound.sample_width', self.sound.sample_width)
+        print('[+] sound.channels', self.sound.channels)
+        print('[+] sound.frame_rate', self.sound.frame_rate)
+        print('[+] sound.frame_count', int(self.sound.frame_count()))
 
         fbins, rbins = self.get_bins(fft_size)
         
@@ -394,6 +442,7 @@ class SoundLayer(Widget):
         ret = 20 * np.log10(ret)          # scale to db
         ret = np.clip(ret, -40, 200)    # clip values
         ret = ret + 40  # to pix
+        ret = (ret / 240.0) * 255.0
         ret = np.concatenate(ret.T)  # join frames and tilt
         ret = np.uint8(ret).reshape(fft_size, frames_num)  # reshape as bins/time
         ret = ret[::-1, :]  # flip vertically for PIL
@@ -412,10 +461,44 @@ class SoundLayer(Widget):
         self.r_bins = fftutils.time_to_freq(right, fft_size=fft_size)
         return self.l_bins, self.r_bins
 
+    def draw(self, ctx):
+        if self.is_focused():
+            ctx.BeginPath()
+            ctx.Rect(self.position()[0], self.position()[1], self.size()[0], self.size()[1])
+            ctx.FillColor(self.selected_color)
+            ctx.Fill()
+            bg = ctx.LinearGradient(self.position()[0],
+                                    self.position()[1],
+                                    self.size()[0],
+                                    self.size()[1],
+                                    self.selected_color,
+                                    self.selected_color)
+            ctx.FillPaint(bg)
+            ctx.Fill()
+        return super(SoundLayer, self).draw(ctx)
+
+    def is_focused(self):
+        return self._focused
+
+    def set_focus(self, val):
+        if val:
+            self._parent.blur_all()
+        self._focused = val
+
+    def mouseButtonEvent(self, p, button, down, modifiers):
+        ret = super(SoundLayer, self).mouseButtonEvent(p, button, down, modifiers)
+        if ret:
+            return ret
+        if (button == 0):
+            if down:
+                self.set_focus(True)
+            return True
+        return False
+
 
 class AudioWindow(Window):
     def __init__(self, parent):
-        super(AudioWindow, self).__init__(parent, "Audio View")
+        super(AudioWindow, self).__init__(parent, 'Audio View')
         self.setPosition((15, 15))
         self.setLayout(GroupLayout())
         self.canvas = AudioCanvas(self)
@@ -426,6 +509,9 @@ class AudioWindow(Window):
     def set_on_cursor_change_callback(self, cb):
         self.canvas.on_cursor_change_cb = cb
 
+    def set_gamma(self, gamma):
+        self.canvas.gamma = gamma
+
 
 class AudioCanvas(GLCanvas):
     def __init__(self, parent):
@@ -434,12 +520,13 @@ class AudioCanvas(GLCanvas):
         self.shader = GLShader()
         self.color = (1.0, 1.0, 1.0)
         self.cursor = 0
+        self.gamma = 2.0
         self.frames = 10000
         self.left_click_down = False
         self.on_cursor_change_cb = None
         self.shader.init(
             # An identifying name
-            "a_simple_shader",
+            'a_simple_shader',
 
             # Vertex shader
             """#version 330
@@ -458,17 +545,17 @@ class AudioCanvas(GLCanvas):
             uniform sampler2D image;
             uniform vec3 in_color;
             uniform float cursor;
+            uniform float gamma;
             in vec2 uv;
             out vec4 color;
             void main() {
+                float inv_gamma = 1.0 / gamma;
                 vec4 current = texture(image, uv);
-                color = vec4(current.x * in_color.x,
-                             current.y * in_color.y,
-                             current.z * in_color.z, 1.0);
-                if (cursor > 0) {
-                    if (abs(uv.x - cursor) <= 0.001) {
-                        color = vec4(1.0 - color.x, 1.0 - color.y, 1.0 - color.z, 1.0);
-                    }
+                color = vec4(pow(current.x * in_color.x, inv_gamma),
+                             pow(current.y * in_color.y, inv_gamma),
+                             pow(current.z * in_color.z, inv_gamma), 1.0);
+                if (abs(uv.x - cursor) <= 0.001) {
+                    color = vec4(1.0 - color.x, 1.0 - color.y, 1.0 - color.z, 1.0);
                 }
             }"""
         )
@@ -507,15 +594,15 @@ class AudioCanvas(GLCanvas):
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
 
-        self.shader.uploadAttrib("position", positions2)
-        self.shader.uploadAttrib("in_uvs", uvs)
+        self.shader.uploadAttrib('position', positions2)
+        self.shader.uploadAttrib('in_uvs', uvs)
 
         self.dial = 0
         self.setSize((900, 250))
         self.cursor = 0.0
 
     def mouseButtonEvent(self, p, button, down, modifiers):
-        # print("[+] AudioCanvas::mouseButtonEvent", p, button, down, modifiers)
+        # print('[+] AudioCanvas::mouseButtonEvent', p, button, down, modifiers)
         if (button == 0):
             self.left_click_down = down
             if down:
@@ -523,7 +610,7 @@ class AudioCanvas(GLCanvas):
         return super(AudioCanvas, self).mouseButtonEvent(p, button, down, modifiers)
 
     def mouseMotionEvent(self, p, rel, button, modifiers):
-        # print("[+] AudioCanvas::mouseMotionEvent", p, rel, button, modifiers)
+        # print('[+] AudioCanvas::mouseMotionEvent', p, rel, button, modifiers)
         if self.left_click_down:
             self.on_cursor_change((p[0]-15) / self.width())
         return super(AudioCanvas, self).mouseMotionEvent(p, rel, button, modifiers)
@@ -533,7 +620,7 @@ class AudioCanvas(GLCanvas):
             self.on_cursor_change_cb(cursor)
 
     def draw_spect(self, layers):
-        print("[+] AudioCanvas::draw_spect", layers)
+        print('[+] AudioCanvas::draw_spect', layers)
         for layer in layers:
             self.color = (layer.color.r, layer.color.g, layer.color.b)
             textureData = layer.get_spect_image(fft_size=FFT_SIZE)
@@ -551,11 +638,11 @@ class AudioCanvas(GLCanvas):
             self.drawGL()
 
     def drawContents(self):
-        # print("[+] AudioCanvas::drawContents")
+        # print('[+] AudioCanvas::drawContents')
         super(AudioCanvas, self).drawContents()
 
     def drawGL(self):
-        # print("[+] AudioCanvas::drawGL")
+        # print('[+] AudioCanvas::drawGL')
         self.shader.bind()
 
         gl.glActiveTexture(gl.GL_TEXTURE0)
@@ -568,12 +655,13 @@ class AudioCanvas(GLCanvas):
         fac = 1
         mvp[0:3, 0:3] *= 0.75 * fac + 0.25
 
-        self.shader.setUniform("modelViewProj", mvp)
-        self.shader.setUniform("in_color", self.color)
-        self.shader.setUniform("cursor", self.cursor)
+        self.shader.setUniform('modelViewProj', mvp)
+        self.shader.setUniform('in_color', self.color)
+        self.shader.setUniform('cursor', self.cursor)
+        self.shader.setUniform('gamma', self.gamma)
 
         nanogui.gl.Enable(nanogui.gl.DEPTH_TEST)
-        self.shader.setUniform("image", 0)
+        self.shader.setUniform('image', 0)
         self.shader.drawIndexed(nanogui.gl.TRIANGLES, 0, 12)
         nanogui.gl.Disable(nanogui.gl.DEPTH_TEST)
         super(AudioCanvas, self).drawGL()
@@ -584,53 +672,100 @@ class AudioCanvas(GLCanvas):
 
 class PlaybackWindow(Window):
     def __init__(self, parent, engine):
-        super(PlaybackWindow, self).__init__(parent, "Playback")
+        super(PlaybackWindow, self).__init__(parent, 'Playback')
         self.setPosition((15, 330))
         self.setLayout(GroupLayout())
         self.setFixedSize((400, 400))
         self.engine = engine
 
-        Label(self, "Location", "sans-bold")
+        Label(self, 'Location', 'sans-bold')
         panel = Widget(self)
         panel.setLayout(BoxLayout(Orientation.Horizontal, Alignment.Middle, 0, 0))
         self.frametb = TextBox(panel)
         self.frametb.setFixedSize((100, 25))
-        self.frametb.setValue("0")
+        self.frametb.setValue('0')
         self.frametb.setFontSize(14)
         self.frametb.setAlignment(TextBox.Alignment.Right)
         self.frametb.setEditable(True)
 
-        label = Label(panel, " ", "sans-bold")
+        label = Label(panel, ' ', 'sans-bold')
         label.setFixedSize((15, 15))
-        label = Label(panel, "/", "sans-bold")
+        label = Label(panel, '/', 'sans-bold')
         label.setFixedSize((20, 15))
 
         self.total_framestb = TextBox(panel)
         self.total_framestb.setFixedSize((100, 25))
-        self.total_framestb.setValue("1000")
+        self.total_framestb.setValue('1000')
         self.total_framestb.setFontSize(14)
         self.total_framestb.setAlignment(TextBox.Alignment.Right)
         self.total_framestb.setEditable(True)
 
-        Label(self, "Controls", "sans-bold")
+        Label(self, 'Controls', 'sans-bold')
         panel = Widget(self)
         panel.setLayout(BoxLayout(Orientation.Horizontal, Alignment.Minimum, 0, 0))
-        ToolButton(panel, entypo.ICON_CONTROLLER_FAST_BACKWARD)
-        ToolButton(panel, entypo.ICON_CONTROLLER_STOP)
-        # ToolButton(panel, entypo.ICON_CONTROLLER_PAUS)
-        tb = ToolButton(panel, entypo.ICON_CONTROLLER_PLAY)
+        self.fbw_button = ToolButton(panel, entypo.ICON_CONTROLLER_FAST_BACKWARD)
+        self.fbw_button.setFlags(Button.Flags.NormalButton)
+        self.fbw_button.setCallback(lambda: self._fbw_cb())
 
-        def cb():
-            print('Play')
+        self.stop_button = ToolButton(panel, entypo.ICON_CONTROLLER_STOP)
+        self.stop_button.setFlags(Button.Flags.NormalButton)
+        self.stop_button.setCallback(lambda: self._stop_cb())
+        
+        self.play_button = ToolButton(panel, entypo.ICON_CONTROLLER_PLAY)
+        self.play_button.setFlags(Button.Flags.NormalButton)
+        self.play_button.setCallback(lambda: self._play_cb())
+        
+        self.ffw_button = ToolButton(panel, entypo.ICON_CONTROLLER_FAST_FORWARD)
+        self.ffw_button.setFlags(Button.Flags.NormalButton)
+        self.ffw_button.setCallback(lambda: self._ffw_cb())
+
+        # Label(self, 'View Params', 'sans-bold')
+        Label(self, 'Gamma', 'sans-bold')
+        # panel = Widget(self)
+        sub_panel = Widget(self)
+        sub_panel.setLayout(BoxLayout(Orientation.Horizontal, Alignment.Minimum, 0, 0))
+        self.gslider = Slider(sub_panel)
+        self.gslider.setFixedSize((180, 20))
+        self.gslider.setValue(0.5)
+        self.gtb = TextBox(sub_panel)
+        self.gtb.setFixedSize((100, 25))
+        self.gtb.setValue('2.0')
+
+        def cb(value):
+            # print (value)
+            self.gtb.setValue('{:.2f}'.format(value * 6.0))
+            self.engine.set_gamma(value * 6.0)
+
+        self.gslider.setCallback(cb)
+        
+   
+    def _fbw_cb(self):
+        self.engine.jump_to_frame(max(self.engine.get_cursor() - FFW_AMOUNT, 0))
+
+    def _ffw_cb(self):
+        self.engine.jump_to_frame(min(self.engine.get_cursor() + FFW_AMOUNT, 
+                                      self.engine.get_total_frames()))
+
+    def _play_cb(self):
+        print('Play/Pause')
+        if self.engine.is_playing:
+            self.engine.pause()
+            self.play_button.setIcon(entypo.ICON_CONTROLLER_PLAY)
+        else:
             self.engine.play()
+            self.play_button.setIcon(entypo.ICON_CONTROLLER_PAUS)
 
-        tb.setCallback(cb)
-        ToolButton(panel, entypo.ICON_CONTROLLER_FAST_FORWARD)
+    def _stop_cb(self):
+        print('Stop')
+        self.engine.pause()
+        self.engine.jump_to_frame(0)
+        self.play_button.setIcon(entypo.ICON_CONTROLLER_PLAY)
+
 
 
 class NomixApp(Screen):
     def __init__(self):
-        super(NomixApp, self).__init__((1440, 900), "Nomix")
+        super(NomixApp, self).__init__((1440, 900), 'Nomix')
 
         self.status = StatusWindow(self)
         self.audio_window = AudioWindow(self)
@@ -645,24 +780,24 @@ class NomixApp(Screen):
         self.engine.set_playback_window(self.pbwindow)
         self.engine.set_audio_window(self.audio_window)
 
-        window = Window(self, "Misc. widgets")
+        window = Window(self, 'Misc. widgets')
         window.setPosition((675, 330))
         window.setLayout(GroupLayout())
 
         tabWidget = TabWidget(window)
-        layer = tabWidget.createTab("Color Wheel")
+        layer = tabWidget.createTab('Color Wheel')
         layer.setLayout(GroupLayout())
 
-        Label(layer, "Color wheel widget", "sans-bold")
+        Label(layer, 'Color wheel widget', 'sans-bold')
         ColorWheel(layer)
 
-        layer = tabWidget.createTab("Function Graph")
+        layer = tabWidget.createTab('Function Graph')
         layer.setLayout(GroupLayout())
-        Label(layer, "Function graph widget", "sans-bold")
+        Label(layer, 'Function graph widget', 'sans-bold')
 
-        graph = Graph(layer, "Some function")
-        graph.setHeader("E = 2.35e-3")
-        graph.setFooter("Iteration 89")
+        graph = Graph(layer, 'Some function')
+        graph.setHeader('E = 2.35e-3')
+        graph.setFooter('Iteration 89')
         values = [0.5 * (0.5 * math.sin(i / 10.0) +
                          0.5 * math.cos(i / 23.0) + 1)
                   for i in range(100)]
@@ -670,20 +805,20 @@ class NomixApp(Screen):
         tabWidget.setActiveTab(0)
 
         # Dummy tab used to represent the last tab button.
-        tabWidget.createTab("+")
+        tabWidget.createTab('+')
 
         def tab_cb(index):
             if index == (tabWidget.tabCount()-1):
                 global counter
-                # When the "+" tab has been clicked, simply add a new tab.
-                tabName = "Dynamic {0}".format(counter)
+                # When the '+' tab has been clicked, simply add a new tab.
+                tabName = 'Dynamic {0}'.format(counter)
                 layerDyn = tabWidget.createTab(index, tabName)
                 layerDyn.setLayout(GroupLayout())
-                Label(layerDyn, "Function graph widget", "sans-bold")
-                graphDyn = Graph(layerDyn, "Dynamic function")
+                Label(layerDyn, 'Function graph widget', 'sans-bold')
+                graphDyn = Graph(layerDyn, 'Dynamic function')
 
-                graphDyn.setHeader("E = 2.35e-3")
-                graphDyn.setFooter("Iteration {0}".format(index*counter))
+                graphDyn.setHeader('E = 2.35e-3')
+                graphDyn.setFooter('Iteration {0}'.format(index*counter))
                 valuesDyn = [0.5 * abs((0.5 * math.sin(i / 10.0 + counter)) +
                                        (0.5 * math.cos(i / 23.0 + 1 + counter)))
                              for i in range(100)]
@@ -698,7 +833,7 @@ class NomixApp(Screen):
         tabWidget.setCallback(tab_cb)
         tabWidget.setActiveTab(0)
 
-        window = Window(self, "Grid of small widgets")
+        window = Window(self, 'Grid of small widgets')
         window.setPosition((425, 330))
         layout = GridLayout(Orientation.Horizontal, 2,
                             Alignment.Middle, 15, 5)
@@ -707,47 +842,47 @@ class NomixApp(Screen):
         layout.setSpacing(0, 10)
         window.setLayout(layout)
 
-        Label(window, "Floating point :", "sans-bold")
+        Label(window, 'Floating point :', 'sans-bold')
         floatBox = TextBox(window)
         floatBox.setEditable(True)
         floatBox.setFixedSize((100, 20))
-        floatBox.setValue("50")
-        # floatBox.setUnits("GiB")
-        floatBox.setDefaultValue("0.0")
+        floatBox.setValue('50')
+        # floatBox.setUnits('GiB')
+        floatBox.setDefaultValue('0.0')
         floatBox.setFontSize(16)
-        floatBox.setFormat("[-]?[0-9]*\\.?[0-9]+")
+        floatBox.setFormat('[-]?[0-9]*\\.?[0-9]+')
 
-        Label(window, "Positive integer :", "sans-bold")
+        Label(window, 'Positive integer :', 'sans-bold')
         intBox = IntBox(window)
         intBox.setEditable(True)
         intBox.setFixedSize((100, 20))
         intBox.setValue(50)
-        intBox.setUnits("Mhz")
-        intBox.setDefaultValue("0")
+        intBox.setUnits('Mhz')
+        intBox.setDefaultValue('0')
         intBox.setFontSize(16)
-        intBox.setFormat("[1-9][0-9]*")
+        intBox.setFormat('[1-9][0-9]*')
         intBox.setSpinnable(True)
         intBox.setMinValue(1)
         intBox.setValueIncrement(2)
 
-        Label(window, "Checkbox :", "sans-bold")
+        Label(window, 'Checkbox :', 'sans-bold')
 
-        cb = CheckBox(window, "Check me")
+        cb = CheckBox(window, 'Check me')
         cb.setFontSize(16)
         cb.setChecked(True)
 
-        Label(window, "Combo box :", "sans-bold")
-        cobo = ComboBox(window, ["Item 1", "Item 2", "Item 3"])
+        Label(window, 'Combo box :', 'sans-bold')
+        cobo = ComboBox(window, ['Item 1', 'Item 2', 'Item 3'])
         cobo.setFontSize(16)
         cobo.setFixedSize((100, 20))
 
-        Label(window, "Color picker :", "sans-bold")
+        Label(window, 'Color picker :', 'sans-bold')
         cp = ColorPicker(window, Color(255, 120, 0, 255))
         cp.setFixedSize((100, 20))
 
         def cp_final_cb(color):
             print(
-                "ColorPicker Final Callback: [{0}, {1}, {2}, {3}]".format(color.r,
+                'ColorPicker Final Callback: [{0}, {1}, {2}, {3}]'.format(color.r,
                                                                           color.g,
                                                                           color.b,
                                                                           color.w)
@@ -757,7 +892,7 @@ class NomixApp(Screen):
 
         # setup a fast callback for the color picker widget on a new window
         # for demonstrative purposes
-        # window = Window(self, "Color Picker Fast Callback")
+        # window = Window(self, 'Color Picker Fast Callback')
         # layout = GridLayout(Orientation.Horizontal, 2,
         #                     Alignment.Middle, 15, 5)
         # layout.setColAlignment(
@@ -766,18 +901,18 @@ class NomixApp(Screen):
         # window.setLayout(layout)
         # window.setPosition((425, 515))
         # window.setFixedSize((235, 300))
-        # Label(window, "Combined: ")
-        # b = Button(window, "ColorWheel", entypo.ICON_500PX)
-        # Label(window, "Red: ")
+        # Label(window, 'Combined: ')
+        # b = Button(window, 'ColorWheel', entypo.ICON_500PX)
+        # Label(window, 'Red: ')
         # redIntBox = IntBox(window)
         # redIntBox.setEditable(False)
-        # Label(window, "Green: ")
+        # Label(window, 'Green: ')
         # greenIntBox = IntBox(window)
         # greenIntBox.setEditable(False)
-        # Label(window, "Blue: ")
+        # Label(window, 'Blue: ')
         # blueIntBox = IntBox(window)
         # blueIntBox.setEditable(False)
-        # Label(window, "Alpha: ")
+        # Label(window, 'Alpha: ')
         # alphaIntBox = IntBox(window)
 
         # def cp_fast_cb(color):
@@ -817,10 +952,13 @@ class NomixApp(Screen):
         if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
             self.setVisible(False)
             return True
+        if key == glfw.KEY_SPACE and action == glfw.PRESS:
+            self.pbwindow._play_cb()
+            return True
         return False
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # app = NSApplication.sharedApplication()
     # delegate = MyApplicationAppDelegate.alloc().init()
     # app.setDelegate_(delegate)
