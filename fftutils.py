@@ -13,7 +13,7 @@ def time_to_freq(channel, fft_size=128, overlap_fac=0.5):
     https://kevinsprojects.wordpress.com/2014/12/13/short-time-fourier-transform-using-python-and-numpy/
     """
     print('[+] time_to_freq', fft_size, channel.shape)
-    hop_size = np.int32(np.floor(fft_size * (1-overlap_fac)))
+    hop_size = np.int32(np.floor(fft_size * overlap_fac))
     # The last segment can overlap the end of the data array by no more than one window size
     pad_end_size = fft_size
     total_segments = np.int32(np.ceil(len(channel) / np.float32(hop_size)))
@@ -42,7 +42,7 @@ def time_to_freq(channel, fft_size=128, overlap_fac=0.5):
 
 def freq_to_time(bins, fft_size=128, overlap_fac=0.5, orig=None, dtype=np.int16):
     print('[+] freq_to_time', fft_size, bins.shape)
-    hop_size = np.int32(np.floor(fft_size * (1-overlap_fac)))
+    hop_size = np.int32(np.floor(fft_size * overlap_fac))
     pad_end_size = fft_size
     total_segments = np.int32(np.ceil(len(bins) / np.float32(hop_size)))
 

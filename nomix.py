@@ -61,8 +61,9 @@ SAMPLE_WIDTH = 2
 CHANNELS = 2
 FRAME_RATE = 44100
 CHUNK_SIZE = 1024
-FFT_SIZE = 2048
+FFT_SIZE = 2048 * 4
 FFW_AMOUNT = 50000
+OVERLAP = 0.5
 
 
 def open_song_from_file(file_path):
@@ -428,7 +429,7 @@ class SoundLayer(Widget):
 
         self.setFixedSize((400, 40))
 
-    def get_spect_image(self, fft_size=FFT_SIZE, zoom=1, offset=0):
+    def get_spect_image(self, fft_size=FFT_SIZE, zoom=1, offset=0, dtype=np.uint8):
         print('[+] sound.sample_width', self.sound.sample_width)
         print('[+] sound.channels', self.sound.channels)
         print('[+] sound.frame_rate', self.sound.frame_rate)
@@ -442,9 +443,9 @@ class SoundLayer(Widget):
         ret = 20 * np.log10(ret)          # scale to db
         ret = np.clip(ret, -40, 200)    # clip values
         ret = ret + 40  # to pix
-        ret = (ret / 240.0) * 255.0
+        ret = (ret / 240.0) * np.iinfo(dtype).max
         ret = np.concatenate(ret.T)  # join frames and tilt
-        ret = np.uint8(ret).reshape(fft_size, frames_num)  # reshape as bins/time
+        ret = dtype(ret).reshape(fft_size, frames_num)  # reshape as bins/time
         ret = ret[::-1, :]  # flip vertically for PIL
         return ret
 
@@ -457,19 +458,22 @@ class SoundLayer(Widget):
 
     def get_bins(self, fft_size=FFT_SIZE):
         left, right = self.get_channels()
-        self.l_bins = fftutils.time_to_freq(left, fft_size=fft_size)
-        self.r_bins = fftutils.time_to_freq(right, fft_size=fft_size)
+        self.l_bins = fftutils.time_to_freq(left, fft_size=fft_size, overlap_fac=OVERLAP)
+        self.r_bins = fftutils.time_to_freq(right, fft_size=fft_size, overlap_fac=OVERLAP)
         return self.l_bins, self.r_bins
 
     def draw(self, ctx):
         if self.is_focused():
             ctx.BeginPath()
-            ctx.Rect(self.position()[0], self.position()[1], self.size()[0], self.size()[1])
+            ctx.Rect(self.position()[0], 
+                     self.position()[1], 
+                     self.size()[0] - 30, 
+                     self.size()[1])
             ctx.FillColor(self.selected_color)
             ctx.Fill()
             bg = ctx.LinearGradient(self.position()[0],
                                     self.position()[1],
-                                    self.size()[0],
+                                    self.size()[0] - 30,
                                     self.size()[1],
                                     self.selected_color,
                                     self.selected_color)
@@ -511,6 +515,9 @@ class AudioWindow(Window):
 
     def set_gamma(self, gamma):
         self.canvas.gamma = gamma
+    
+    def set_zoom(self, zoom):
+        self.canvas.zoom = zoom
 
 
 class AudioCanvas(GLCanvas):
@@ -542,20 +549,32 @@ class AudioCanvas(GLCanvas):
 
             # Fragment shader
             """#version 330
+            const float max_freq = 22050.0;
             uniform sampler2D image;
+            uniform sampler2D scaletex;
             uniform vec3 in_color;
             uniform float cursor;
             uniform float gamma;
+            //uniform float zoom;
             in vec2 uv;
             out vec4 color;
+            float log10(float x) {
+                return log(x) / log(10);
+            }
+            float mel(float freq) {
+                return 2595.0 * log10(1.0 + freq/700.0);
+            }
+            float new_v(float v) {
+                float freq = max_freq * v;
+                return mel(freq) / mel(max_freq);
+            }
             void main() {
                 float inv_gamma = 1.0 / gamma;
-                vec4 current = texture(image, uv);
-                color = vec4(pow(current.x * in_color.x, inv_gamma),
-                             pow(current.y * in_color.y, inv_gamma),
-                             pow(current.z * in_color.z, inv_gamma), 1.0);
+                float scale = texture(scaletex, uv).r;
+                float power = pow(texture(image, vec2(uv.x, new_v(uv.y))).r, inv_gamma);
+                color = vec4(in_color.xyz * power, 1.0);
                 if (abs(uv.x - cursor) <= 0.001) {
-                    color = vec4(1.0 - color.x, 1.0 - color.y, 1.0 - color.z, 1.0);
+                    color = vec4(1.0 - color.x, 1.0 - color.y, 1.0 - color.z, scale);
                 }
             }"""
         )
@@ -593,6 +612,35 @@ class AudioCanvas(GLCanvas):
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT)
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        
+        self.scaletextid = gl.glGenTextures(1)
+        gl.glActiveTexture(gl.GL_TEXTURE1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.scaletextid)
+        gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
+        gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT)
+        gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT)
+        gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameterf(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+
+        hz_freqs = (np.fft.fftfreq(FFT_SIZE) * FRAME_RATE)[:int(FFT_SIZE/2)]
+
+        def freq_to_mel(x):
+            return 2595 * np.log10(1 + x / 700.0)
+
+        mel_freqs = freq_to_mel(hz_freqs)
+        mel_scale = mel_freqs / max(mel_freqs)
+        scale = mel_scale
+        textureData = (scale * np.iinfo(np.uint16).max).astype(np.uint16)[::-1]
+
+        width = 1
+        height = textureData.shape[0]
+        gl.glTexImage2D(gl.GL_TEXTURE_2D,
+                        0,
+                        gl.GL_R8,
+                        width, height, 0,
+                        gl.GL_RED,
+                        gl.GL_UNSIGNED_SHORT,
+                        textureData)
 
         self.shader.uploadAttrib('position', positions2)
         self.shader.uploadAttrib('in_uvs', uvs)
@@ -623,18 +671,21 @@ class AudioCanvas(GLCanvas):
         print('[+] AudioCanvas::draw_spect', layers)
         for layer in layers:
             self.color = (layer.color.r, layer.color.g, layer.color.b)
-            textureData = layer.get_spect_image(fft_size=FFT_SIZE)
-            # import pdb; pdb.set_trace()
-            width = 800
-            im = Image.fromarray(textureData).resize((width, 128)).convert('RGB')
-            textureData = np.array(im)
-            height = 128
-            # import pdb; pdb.set_trace()
+            textureData = layer.get_spect_image(fft_size=FFT_SIZE, dtype=np.uint16)
+
+            height = textureData.shape[0]
+            width = textureData.shape[1]
             self.shader.bind()
             gl.glActiveTexture(gl.GL_TEXTURE0)
             gl.glBindTexture(gl.GL_TEXTURE_2D, self.videotexid)
-            glu.gluBuild2DMipmaps(gl.GL_TEXTURE_2D, gl.GL_RGB, width, height, gl.GL_RGB,
-                                  gl.GL_UNSIGNED_BYTE, textureData)
+
+            gl.glTexImage2D(gl.GL_TEXTURE_2D,
+                            0,
+                            gl.GL_R8,
+                            width, height, 0,
+                            gl.GL_RED,
+                            gl.GL_UNSIGNED_SHORT,
+                            textureData)
             self.drawGL()
 
     def drawContents(self):
@@ -647,14 +698,14 @@ class AudioCanvas(GLCanvas):
 
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.videotexid)
+        
 
         current_time = time.time()
         mvp = np.identity(4)
 
-        # fac = (math.sin(current_time) + 1) / 2.0
-        fac = 1
-        mvp[0:3, 0:3] *= 0.75 * fac + 0.25
-
+        fac = (math.sin(current_time) + 1) / 2.0
+        # fac = 1
+        # mvp[0:3, 0:3] *= 0.75 * fac + 0.25
         self.shader.setUniform('modelViewProj', mvp)
         self.shader.setUniform('in_color', self.color)
         self.shader.setUniform('cursor', self.cursor)
@@ -662,6 +713,9 @@ class AudioCanvas(GLCanvas):
 
         nanogui.gl.Enable(nanogui.gl.DEPTH_TEST)
         self.shader.setUniform('image', 0)
+        gl.glActiveTexture(gl.GL_TEXTURE1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.scaletextid)
+        self.shader.setUniform('scaletex', 1)
         self.shader.drawIndexed(nanogui.gl.TRIANGLES, 0, 12)
         nanogui.gl.Disable(nanogui.gl.DEPTH_TEST)
         super(AudioCanvas, self).drawGL()
@@ -726,7 +780,7 @@ class PlaybackWindow(Window):
         sub_panel.setLayout(BoxLayout(Orientation.Horizontal, Alignment.Minimum, 0, 0))
         self.gslider = Slider(sub_panel)
         self.gslider.setFixedSize((180, 20))
-        self.gslider.setValue(0.5)
+        self.gslider.setValue((1.0 / 6.0) * 2.0)
         self.gtb = TextBox(sub_panel)
         self.gtb.setFixedSize((100, 25))
         self.gtb.setValue('2.0')
