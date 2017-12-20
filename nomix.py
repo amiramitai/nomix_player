@@ -21,6 +21,8 @@ import os
 from random import shuffle
 from PIL import Image
 import _thread
+import soundfile
+from bregman.suite import *
 
 
 from scipy.fftpack import fft, fftfreq
@@ -44,6 +46,7 @@ import threading
 
 import argparse
 
+from actions import do_action
 # pyfftw.interfaces.cache.enable()
 
 
@@ -61,19 +64,301 @@ SAMPLE_WIDTH = 2
 CHANNELS = 2
 FRAME_RATE = 44100
 CHUNK_SIZE = 1024
-FFT_SIZE = 2048 * 4
+FFT_SIZE = 1024
 FFW_AMOUNT = 50000
 OVERLAP = 0.5
 
+Minor = 0
+Major = 1
+Suspended = 2
+Dominant = 3
+Dimished5th = 4
+Augmented5th = 5
+
+
+def get_normalized_path(file_path):
+    comps = file_path.split('.')
+    filebase = '.'.join(comps[:-1])
+    return '{}.norm.wav'.format(filebase)
+
 
 def open_song_from_file(file_path):
-    song = AudioSegment.from_file(file_path)
-    song.set_frame_rate(FRAME_RATE)
-    song.set_sample_width(SAMPLE_WIDTH)
-    song.set_channels(CHANNELS)
-    return song
+    # if has norm cache
+    norm_file_path = get_normalized_path(file_path)
+    if not os.path.isfile(norm_file_path):
+        # if no cache
+        print('[+] normalizing')
+        tmp = AudioSegment.from_file(file_path)
+        # does it need normalization?
+        if tmp.sample_width == SAMPLE_WIDTH:
+            return tmp
+        downsampled = tmp.set_sample_width(SAMPLE_WIDTH)
+        downsampled.export(norm_file_path, format='wav')
+    
+    return AudioSegment.from_file(norm_file_path)
 
 
+def calculateChordScore(chroma, chordProfile, biasToUse, N):
+    _sum = 0.0
+    delta = 0
+
+    for i in range(12):
+        _sum += (1 - chordProfile[i]) * (chroma[i] * chroma[i])
+
+    delta = math.sqrt(_sum) / ((12 - N) * biasToUse)
+    
+    return delta
+
+
+def minimumIndex(array, arrayLength):
+    minValue = 100000
+    minIndex = 0
+
+    for i in range(len(array)):
+        if array[i] < minValue:
+            minValue = array[i]
+            minIndex = i
+
+    return minIndex
+
+
+def makeChordProfiles():
+    chordProfiles = np.zeros((108, 12), dtype=np.uint8)
+    v1 = 1
+    v2 = 1
+    v3 = 1
+
+    # set profiles matrix to all zeros
+    for j in range(108):
+        for t in range(12):
+            chordProfiles[j, t] = 0
+    
+    # reset j to zero to begin creating profiles
+    j = 0
+    
+    # major chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 4) % 12
+        fifth = (i + 7) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        
+        j += 1
+
+    # minor chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 3) % 12
+        fifth = (i + 7) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        
+        j += 1		
+
+    # diminished chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 3) % 12
+        fifth = (i + 6) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        
+        j += 1		
+    
+    # augmented chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 4) % 12
+        fifth = (i + 8) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        
+        j += 1
+    
+    # sus2 chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 2) % 12
+        fifth = (i + 7) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        
+        j += 1
+    
+    # sus4 chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 5) % 12
+        fifth = (i + 7) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        
+        j += 1	
+    
+    # major 7th chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 4) % 12
+        fifth = (i + 7) % 12
+        seventh = (i + 11) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        chordProfiles[j, seventh] = v3
+        
+        j += 1
+    
+    # minor 7th chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 3) % 12
+        fifth = (i + 7) % 12
+        seventh = (i + 10) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        chordProfiles[j, seventh] = v3
+        
+        j += 1
+    
+    # dominant 7th chords
+    for i in range(12):
+        root = i % 12
+        third = (i + 4) % 12
+        fifth = (i + 7) % 12
+        seventh = (i + 10) % 12
+        
+        chordProfiles[j, root] = v1
+        chordProfiles[j, third] = v2
+        chordProfiles[j, fifth] = v3
+        chordProfiles[j, seventh] = v3
+        
+        j += 1
+
+    return chordProfiles
+
+
+def classify_chromagram(chromagram, chordProfiles):
+    chord = np.zeros(108, dtype=np.uint8)
+    bias = 1.06
+    # remove some of the 5th note energy from chromagram
+    for i in range(12):
+        fifth = (i+7) % 12
+        chromagram[fifth] = chromagram[fifth] - (0.1 * chromagram[i])
+        
+        if (chromagram[fifth] < 0):
+            chromagram[fifth] = 0
+    
+    # major chords
+    for i in range(12):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], bias, 3)
+    
+    # minor chords
+    for i in range(12):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], bias, 3)
+
+    # diminished 5th chords
+    for i in range(24, 36):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], bias, 3);
+
+    # augmented 5th chords
+    for i in range(36, 48):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], bias, 3);
+
+    # sus2 chords
+    for i in range(48, 60):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], 1, 3)
+    
+    # sus4 chords
+    for i in range(60, 72):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], 1, 3)
+    
+    # major 7th chords
+    for i in range(72, 84):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], 1, 4)
+    
+    # minor 7th chords
+    for i in range(84, 96):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], bias, 4)
+
+    # dominant 7th chords
+    for i in range(96, 108):
+        chord[i] = calculateChordScore(chromagram, chordProfiles[i], bias, 4)
+
+    chordindex = minimumIndex(chord, 108)
+    
+    # major
+    if (chordindex < 12):
+        rootNote = chordindex
+        quality = Major
+        intervals = 0
+    
+    # minor
+    if ((chordindex >= 12) and (chordindex < 24)):
+        rootNote = chordindex - 12
+        quality = Minor
+        intervals = 0
+    
+    # diminished 5th
+    if ((chordindex >= 24) and (chordindex < 36)):
+        rootNote = chordindex - 24
+        quality = Dimished5th
+        intervals = 0
+    
+    # augmented 5th
+    if ((chordindex >= 36) and (chordindex < 48)):
+        rootNote = chordindex - 36
+        quality = Augmented5th
+        intervals = 0
+    
+    # sus2
+    if ((chordindex >= 48) and (chordindex < 60)):
+        rootNote = chordindex - 48
+        quality = Suspended
+        intervals = 2
+    
+    # sus4
+    if ((chordindex >= 60) and (chordindex < 72)):
+        rootNote = chordindex - 60
+        quality = Suspended
+        intervals = 4
+    
+    # major 7th
+    if ((chordindex >= 72) and (chordindex < 84)):
+        rootNote = chordindex - 72
+        quality = Major
+        intervals = 7
+    
+    # minor 7th
+    if ((chordindex >= 84) and (chordindex < 96)):
+        rootNote = chordindex - 84
+        quality = Minor
+        intervals = 7
+    
+    # dominant 7th
+    if ((chordindex >= 96) and (chordindex < 108)):
+        rootNote = chordindex - 96
+        quality = Dominant
+        intervals = 7
+
+    return rootNote, quality, intervals
+
+    
 class AudioEngine:
     def __init__(self):
         self.layer_list = None
@@ -101,6 +386,13 @@ class AudioEngine:
         self.data_ptr = self.start_frame * CHANNELS
         self.player = pyaudio.PyAudio()
         self.start_time = time.time()
+        nomix_set_status('[+] Initializing chromogram...')
+        F = Chromagram("st.norm.wav", nfft=16384, wfft=8192, nhop=2205)
+        nomix_set_status('[+] Making chord profiles...')
+        chord_profiles = makeChordProfiles()
+        nomix_set_status('[+] classifying chords...')
+        self.notes = [classify_chromagram(c, chord_profiles) for c in F.X.T]
+        nomix_set_status('[+] Initialzing audio...')
         # print('[+] start_time = ', self.start_time)
         self.stream = self.player.open(format=self.player.get_format_from_width(SAMPLE_WIDTH),
                                        channels=CHANNELS,
@@ -128,6 +420,11 @@ class AudioEngine:
             return (data, pyaudio.paComplete)
         self.data_ptr += len(data)
         time_passed = time.time() - self.start_time
+        cursor = (self.start_frame + (time_passed * FRAME_RATE)) / self.total_frames
+        note_cursor = int(cursor * len(self.notes))
+        cur_note = self.notes[note_cursor][0]
+        NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+        print('[+] NOTE:', note_cursor, NOTES[cur_note])
         self.time_update_callback(self.start_frame + int(time_passed * FRAME_RATE))
         return (data, pyaudio.paContinue)
         
@@ -232,19 +529,18 @@ class StatusWindow(Window):
 
 
 class LayersWindow(Window):
-    def __init__(self, parent, width=400):
+    def __init__(self, parent, width=400):        
         super(LayersWindow, self).__init__(parent, 'Layers')
         self.setLayout(GridLayout(orientation=Orientation.Vertical))
 
-        SCROLL_BAR = 100
         self.layers_scroll = VScrollPanel(self)
         self.layers_scroll.setFixedSize((width, 600))
+        
         self.layers = LayersList(self.layers_scroll)
         self.redraw_spec_cb = None
 
         right_align = Widget(self)
         right_align.setLayout(GridLayout())
-
         TOOLS_WIDTH = 130
         TOOLS_HEIGHT = 15
 
@@ -260,6 +556,9 @@ class LayersWindow(Window):
         tb = ToolButton(tools, entypo.ICON_ADD_TO_LIST)
 
         def cb():
+            valid = [('mp3', ''), ('wav', '')]
+            file_path = nanogui.file_dialog(valid, False)
+            song = open_song_from_file(file_path)
             layer = self.layers.add_layer('New Layer')
             if self.redraw_spec_cb:
                 self.redraw_spec_cb()
@@ -282,6 +581,7 @@ class LayersList(Widget):
     def __init__(self, parent):
         super(LayersList, self).__init__(parent)
         self.setLayout(GroupLayout())
+        self.setFixedSize((400, 0))
         self.layers = []
         self.shouldPerformLayout = False
         self.engine = None
@@ -296,8 +596,6 @@ class LayersList(Widget):
 
         for i in range(0):
             self.add_layer('Layer ' + str(i+1))
-
-        self.setFixedSize((400, 0))
 
         self.cache = None
 
@@ -322,15 +620,7 @@ class LayersList(Widget):
         for layer in self.layers:
             layer.set_focus(False)
 
-    def add_layer(self, name, file_path=None):
-        valid = [('mp3', ''), ('wav', '')]
-        if not file_path:
-            file_path = nanogui.file_dialog(valid, False)
-        # result = '/Users/amiramitai/Projects/nomix/st.mp3'
-        if not os.path.isfile(file_path):
-            RuntimeError('Selected file isnt in place', result)
-
-        song = open_song_from_file(file_path)
+    def add_layer(self, name, song):
         shuffle(self.colorchoices)
         h = self.colorchoices.pop()
         # print(h)
@@ -375,9 +665,9 @@ class LayersList(Widget):
                 r = np.vstack((r, to_pad))
             out_l += l
             out_r += r
-        out_l = fftutils.freq_to_time(out_l / total_layers, fft_size=FFT_SIZE)
+        out_l = fftutils.windowed_ifft(out_l / total_layers, fft_size=FFT_SIZE)
         # import pdb; pdb.set_trace()
-        out_r = fftutils.freq_to_time(out_r / total_layers, fft_size=FFT_SIZE)
+        out_r = fftutils.windowed_ifft(out_r / total_layers, fft_size=FFT_SIZE)
         return np.vstack((out_l, out_r)).T.flatten()
         # return out_l
         # return self.layers[0].get_channels()
@@ -439,6 +729,7 @@ class SoundLayer(Widget):
         
         ret = fbins[:, :fft_size]
         frames_num = ret.shape[0]
+        # import pdb; pdb.set_trace()
         ret = np.abs(ret)
         ret = 20 * np.log10(ret)          # scale to db
         ret = np.clip(ret, -40, 200)    # clip values
@@ -450,6 +741,11 @@ class SoundLayer(Widget):
         return ret
 
     def get_channels(self):
+        if self.sound.channels == 1:
+            for chunks in make_chunks(self.sound, int(self.sound.frame_count())):
+                left = np.array(chunks.get_array_of_samples())
+                return left, left
+
         for chunks in make_chunks(self.sound, int(self.sound.frame_count())):
             samps = chunks.get_array_of_samples()
             left = np.array(samps[::2])  # left ch
@@ -458,8 +754,8 @@ class SoundLayer(Widget):
 
     def get_bins(self, fft_size=FFT_SIZE):
         left, right = self.get_channels()
-        self.l_bins = fftutils.time_to_freq(left, fft_size=fft_size, overlap_fac=OVERLAP)
-        self.r_bins = fftutils.time_to_freq(right, fft_size=fft_size, overlap_fac=OVERLAP)
+        self.l_bins = fftutils.windowed_fft(left, fft_size=fft_size, overlap_fac=OVERLAP)
+        self.r_bins = fftutils.windowed_fft(right, fft_size=fft_size, overlap_fac=OVERLAP)
         return self.l_bins, self.r_bins
 
     def draw(self, ctx):
@@ -698,7 +994,6 @@ class AudioCanvas(GLCanvas):
 
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.videotexid)
-        
 
         current_time = time.time()
         mvp = np.identity(4)
@@ -791,8 +1086,7 @@ class PlaybackWindow(Window):
             self.engine.set_gamma(value * 6.0)
 
         self.gslider.setCallback(cb)
-        
-   
+
     def _fbw_cb(self):
         self.engine.jump_to_frame(max(self.engine.get_cursor() - FFW_AMOUNT, 0))
 
@@ -823,16 +1117,15 @@ class NomixApp(Screen):
 
         self.status = StatusWindow(self)
         self.audio_window = AudioWindow(self)
-        self.layers_window = LayersWindow(self)
         self.engine = AudioEngine()
+        self.pbwindow = PlaybackWindow(self, self.engine)
+        self.layers_window = LayersWindow(self)
         self.layers_window.layers.set_engine(self.engine)
         self.layers_window.redraw_spec_cb = self.redraw_spect
         
-        self.pbwindow = PlaybackWindow(self, self.engine)
-        
         self.engine.set_layer_list(self.layers_window.layers)
-        self.engine.set_playback_window(self.pbwindow)
         self.engine.set_audio_window(self.audio_window)
+        self.engine.set_playback_window(self.pbwindow)
 
         window = Window(self, 'Misc. widgets')
         window.setPosition((675, 330))
@@ -943,51 +1236,10 @@ class NomixApp(Screen):
             )
 
         cp.setFinalCallback(cp_final_cb)
-
-        # setup a fast callback for the color picker widget on a new window
-        # for demonstrative purposes
-        # window = Window(self, 'Color Picker Fast Callback')
-        # layout = GridLayout(Orientation.Horizontal, 2,
-        #                     Alignment.Middle, 15, 5)
-        # layout.setColAlignment(
-        #     [Alignment.Maximum, Alignment.Fill])
-        # layout.setSpacing(0, 10)
-        # window.setLayout(layout)
-        # window.setPosition((425, 515))
-        # window.setFixedSize((235, 300))
-        # Label(window, 'Combined: ')
-        # b = Button(window, 'ColorWheel', entypo.ICON_500PX)
-        # Label(window, 'Red: ')
-        # redIntBox = IntBox(window)
-        # redIntBox.setEditable(False)
-        # Label(window, 'Green: ')
-        # greenIntBox = IntBox(window)
-        # greenIntBox.setEditable(False)
-        # Label(window, 'Blue: ')
-        # blueIntBox = IntBox(window)
-        # blueIntBox.setEditable(False)
-        # Label(window, 'Alpha: ')
-        # alphaIntBox = IntBox(window)
-
-        # def cp_fast_cb(color):
-        #     b.setBackgroundColor(color)
-        #     b.setTextColor(color.contrastingColor())
-        #     red = int(color.r * 255.0)
-        #     redIntBox.setValue(red)
-        #     green = int(color.g * 255.0)
-        #     greenIntBox.setValue(green)
-        #     blue = int(color.b * 255.0)
-        #     blueIntBox.setValue(blue)
-        #     alpha = int(color.w * 255.0)
-        #     alphaIntBox.setValue(alpha)
-
-        # cp.setCallback(cp_fast_cb)
-
         self.performLayout()
 
-    def add_layer(self, file_path):
-        name = os.path.basename(file_path)
-        self.layers_window.layers.add_layer(name, file_path=file_path)
+    def add_layer(self, name, song):
+        self.layers_window.layers.add_layer(name, song)
 
     def redraw_spect(self):
         self.audio_window.canvas.draw_spect(self.layers_window.layers.layers)
@@ -1012,25 +1264,60 @@ class NomixApp(Screen):
         return False
 
 
-if __name__ == '__main__':
-    # app = NSApplication.sharedApplication()
-    # delegate = MyApplicationAppDelegate.alloc().init()
-    # app.setDelegate_(delegate)
+def print_info(song):
+    print('frame_rate', song.frame_rate)
+    print('frames', int(song.frame_count()))
+    print('sample_width', int(song.sample_width))
+    print('channels', int(song.channels))
+
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('audiofiles', nargs='*')
+    parser.add_argument('--norm', action='store_true', default=False, help='normalizes input audio')
+    parser.add_argument('--info', '-i', action='store_true', default=False, help='prints info')
+    parser.add_argument('--nogui', action='store_true', default=False, help='commandline mode')
+    parser.add_argument('--play', action='store_true', default=False, help='plays on startup')
+    parser.add_argument('--action', '-a')
 
     args = parser.parse_args()
+
+    songs = []
+    for audiofile in args.audiofiles:
+        # nomix.add_layer(audiofile)
+        songs.append(open_song_from_file(audiofile))
+    
+    # if args.norm:
+    #     for song in songs:
+    #         normalize(song)
+
+    if args.info:
+        for song in songs:
+            print_info(song)
+        return
+
+    if args.nogui:
+        return
+
     nanogui.init()
     nomix = NomixApp()
-    for audiofile in args.audiofiles:
-        nomix.add_layer(audiofile)
-    if args.audiofiles:
+    i = 0
+    if songs:
+        for song in songs:
+            nomix.add_layer(str(i), song)
+            i += 1
         nomix.redraw_spect()
-    # nomix.engine.play()
     nomix_set_status('[+] Initialized')
+    print('[+] starting in gui mode')
     nomix.drawAll()
     nomix.setVisible(True)
+    if args.play:
+        nomix.engine.play(0)
     nanogui.mainloop()
     del nomix
     gc.collect()
     nanogui.shutdown()
+
+
+if __name__ == '__main__':
+    main()

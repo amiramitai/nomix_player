@@ -5,3 +5,12 @@ numpy==1.13.3
 PyOpenGL==3.1.0
 Pillow==4.3.0
 scipy==0.19.1
+librosa==0.5.1
+psycopg2==2.7.3.2
+
+
+eyeD3==0.8.3
+simplejson==3.11.1
+hmmlearn==0.2.0
+sklearn
+git+https://github.com/josiah-wolf-oberholtzer/BregmanToolkit

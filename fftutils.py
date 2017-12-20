@@ -7,7 +7,7 @@ from pydub import AudioSegment
 from pydub.utils import make_chunks
 
 
-def time_to_freq(channel, fft_size=128, overlap_fac=0.5):
+def windowed_fft(channel, fft_size=128, overlap_fac=0.5):
     """
     was taken from here:
     https://kevinsprojects.wordpress.com/2014/12/13/short-time-fourier-transform-using-python-and-numpy/
@@ -40,7 +40,7 @@ def time_to_freq(channel, fft_size=128, overlap_fac=0.5):
     return result
 
 
-def freq_to_time(bins, fft_size=128, overlap_fac=0.5, orig=None, dtype=np.int16):
+def windowed_ifft(bins, fft_size=128, overlap_fac=0.5, orig=None, dtype=np.int16):
     print('[+] freq_to_time', fft_size, bins.shape)
     hop_size = np.int32(np.floor(fft_size * overlap_fac))
     pad_end_size = fft_size
